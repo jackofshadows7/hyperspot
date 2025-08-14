@@ -1,0 +1,52 @@
+[package]
+name = "modkit"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "modkit"
+
+[features]
+# Enable the runner and the runtime integration by default.
+default = ["runtime"]
+
+# The ModKit runner (modkit::runtime). Kept feature-gated for flexibility.
+runtime = []
+
+# Adapter to use runtime::signals::wait_for_shutdown().
+# Uses an optional dependency, hence "dep:runtime".
+hs-runtime = ["runtime", "dep:runtime"]
+
+[dependencies]
+# Project-local crates
+runtime = { path = "../runtime", optional = true }
+modkit-macros     = { path = "./macros" }
+db                = { path = "../db" }
+
+# Core deps
+anyhow       = { workspace = true }
+async-trait  = { workspace = true }
+inventory    = "0.3"
+tracing      = { workspace = true }
+
+tokio        = { workspace = true }
+tokio-util   = { version = "0.7", features = ["rt"] }
+
+# Router/types used in contracts and runtime
+axum         = { workspace = true }
+http         = "1.0"
+
+# OpenAPI/serde
+schemars     = { version = "0.8", features = ["derive", "preserve_order"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+
+# Performance / lock-free structures
+dashmap      = { workspace = true }
+parking_lot = "0.12.4"
+thiserror    = "2.0"
+
+[dev-dependencies]
+tokio        = { workspace = true }
+trybuild     = "1.0"
+serde_json   = "1.0"

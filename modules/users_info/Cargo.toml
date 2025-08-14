@@ -1,0 +1,51 @@
+[package]
+name = "users_info"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies
+anyhow = "1.0"
+async-trait = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+tracing = "0.1"
+inventory = "0.3"
+
+# Serde and JSON schema
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+
+# HTTP and REST
+axum = { workspace = true, features = ["macros"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID support
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Lock-free atomic swaps
+arc-swap = "1.7"
+
+# Database - SeaORM
+sea-orm = { version = "1.0", features = [
+    "sqlx-sqlite", 
+    "runtime-tokio-rustls", 
+    "macros", 
+    "with-chrono",
+    "with-uuid"
+] }
+sea-orm-migration = "1.0"
+
+# Error handling
+thiserror = "1.0"
+
+# Local dependencies
+modkit = { path = "../../libs/modkit" }
+db = { path = "../../libs/db" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tokio-test = "0.4"

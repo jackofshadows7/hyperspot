@@ -1,0 +1,5 @@
+error: duplicate `lifecycle(...)` parameter
+ --> tests/ui/fail/duplicate_lifecycle.rs:3:63
+  |
+3 | #[module(name="x", caps=[stateful], lifecycle(entry="serve"), lifecycle(entry="serve"))]
+  |                                                               ^^^^^^^^^

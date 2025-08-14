@@ -1,0 +1,14 @@
+error[E0599]: no method named `register` found for struct `OperationBuilder<Missing, Missing, ()>` in the current scope
+  --> tests/ui/no_handler_no_response.rs:21:10
+   |
+18 |       let _ = OperationBuilder::<_, _, ()>::get("/test")
+   |  _____________-
+19 | |         .summary("Test endpoint")
+20 | |         .description("A test endpoint")
+21 | |         .register(router, &registry);
+   | |         -^^^^^^^^ method not found in `OperationBuilder<Missing, Missing, ()>`
+   | |_________|
+   |
+   |
+   = note: the method was found for
+           - `OperationBuilder<Present, Present, S>`

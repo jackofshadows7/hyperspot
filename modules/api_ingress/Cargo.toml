@@ -1,0 +1,56 @@
+[package]
+name = "api_ingress"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "api_ingress"
+path = "src/lib.rs"
+
+[dependencies]
+modkit = { path = "../../libs/modkit" }
+modkit-macros = { path = "../../libs/modkit/macros" }
+runtime = { path = "../../libs/runtime" }
+inventory = "0.3"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+
+# High-performance data structures
+dashmap = { workspace = true }
+arc-swap = { workspace = true }
+validator = "0.18"
+nanoid = "0.4"
+
+# Web framework dependencies (only for this module)
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tonic = { version = "0.12", optional = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# OpenAPI and embedded assets
+schemars = { version = "0.8", features = ["derive", "preserve_order"] }
+rust-embed = "8"
+
+[dev-dependencies]
+hyper = { version = "1.0", features = ["full"] }
+tokio-test = "0.4"
+async-trait = { workspace = true }
+
+[features]
+grpc = ["tonic"]
+debug-errors = []
+embed_elements = []
+
+[build-dependencies]
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
