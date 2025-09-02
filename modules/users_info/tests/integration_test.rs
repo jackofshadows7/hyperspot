@@ -14,9 +14,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use users_info::{
-    api::rest::dto::{CreateUserReq, UpdateUserReq, UserDto, UserListDto},
+    api::rest::dto::{CreateUserReq, UserDto},
     contract::client::UsersInfoApi,
-    contract::model::{NewUser, User, UserPatch},
     domain::service::{Service, ServiceConfig},
     gateways::local::UsersInfoLocalClient,
     infra::storage::migrations::Migrator,

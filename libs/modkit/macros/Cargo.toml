@@ -14,3 +14,9 @@ heck = "0.5"
 
 [dev-dependencies]
 trybuild = "1"
+tokio-util = "0.7"
+anyhow = "1.0"
+async-trait = "0.1"
+inventory = "0.3"
+tokio = "1.0"
+modkit = { path = "..", default-features = false }

@@ -1818,10 +1818,16 @@ dependencies = [
 name = "modkit-macros"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "heck 0.5.0",
+ "inventory",
+ "modkit",
  "proc-macro2",
  "quote",
  "syn 2.0.106",
+ "tokio",
+ "tokio-util",
  "trybuild",
 ]
 
