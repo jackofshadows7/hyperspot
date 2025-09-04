@@ -56,8 +56,9 @@ impl modkit::api::OpenApiRegistry for MockOpenApiRegistry {
         // No-op for tests
     }
 
-    fn register_schema(&self, _name: &str, _schema: schemars::schema::RootSchema) {
-        // No-op for tests
+    fn ensure_schema_raw(&self, root_name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+        // Return the root name for tests
+        root_name.to_string()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

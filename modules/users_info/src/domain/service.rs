@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::contract::model::{NewUser, User, UserPatch};
 use crate::domain::error::DomainError;
-use crate::infra::storage::{entity, mapper};
+use crate::infra::storage::entity;
 
 /// Domain service containing business logic for user management
 #[derive(Clone)]
@@ -46,7 +46,7 @@ impl Service {
             .map_err(|e| DomainError::database(e.to_string()))?
             .ok_or_else(|| DomainError::user_not_found(id))?;
 
-        let user = mapper::entity_to_contract(entity);
+        let user: User = entity.into();
         debug!("Successfully retrieved user");
         Ok(user)
     }
@@ -70,7 +70,7 @@ impl Service {
 
         let users: Vec<User> = entities
             .into_iter()
-            .map(mapper::entity_to_contract)
+            .map(Into::into)
             .collect();
 
         debug!("Successfully listed {} users", users.len());
@@ -107,7 +107,7 @@ impl Service {
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
-        let user = mapper::entity_to_contract(created_entity);
+        let user: User = created_entity.into();
         info!("Successfully created user with id={}", user.id);
         Ok(user)
     }
@@ -146,7 +146,7 @@ impl Service {
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
-        let user = mapper::entity_to_contract(updated_entity);
+        let user: User = updated_entity.into();
         info!("Successfully updated user");
         Ok(user)
     }

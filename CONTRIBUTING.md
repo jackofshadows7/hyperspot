@@ -64,6 +64,7 @@ Use descriptive branch names:
 - `feature/user-authentication`
 - `fix/memory-leak-in-router`
 - `docs/api-gateway-examples`
+- `refactor/entity-to-contract-conversions`
 
 ### 2. Make Your Changes
 

@@ -39,7 +39,9 @@ tonic = { version = "0.12", optional = true }
 chrono = { workspace = true }
 
 # OpenAPI and embedded assets
-schemars = { version = "0.8", features = ["derive", "preserve_order"] }
+utoipa = { workspace = true }
+indexmap = "2.0"
+http = "1.0"
 rust-embed = "8"
 
 [dev-dependencies]

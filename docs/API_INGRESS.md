@@ -1,6 +1,14 @@
 # API Ingress Module
 
 The **API Ingress** module (`api_ingress`) is the single HTTP gateway of your app. It owns the Axum server and OpenAPI document, gathers REST routes from all modules at the **REST registration phase**, and serves them during **lifecycle start**.
+
+## ✨ Recent Updates
+
+- **RFC-9457 Error Handling**: Centralized `ProblemResponse` types in `modkit` with automatic OpenAPI integration
+- **Enhanced OperationBuilder**: Added `.problem_response()` helpers for standardized error responses
+- **Improved Schema Registration**: Automatic schema registration with `utoipa::ToSchema` and conflict resolution
+- **Content-Type Handling**: Proper `application/problem+json` support in OpenAPI generation
+
 This README reflects the *current, in-process* design (no out-of-process/proxy modules here).
 
 ---
@@ -103,7 +111,6 @@ Example:
 
 ```rust
 use modkit::api::OperationBuilder;
-use schemars::schema_for;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -112,24 +119,28 @@ impl RestfulModule for MyModule {
         &self,
         _ctx: &ModuleCtx,
         router: Router,
-        openapi: &mut dyn crate::api::OpenApiRegistry,
+        openapi: &dyn crate::api::OpenApiRegistry,
     ) -> anyhow::Result<Router> {
-        openapi.register_schema("Resource", schema_for!(dto::Resource));
+        // Schemas are automatically registered via OperationBuilder methods
 
         let router = OperationBuilder::get("/resources/{id}")
             .operation_id("resources.get")
             .summary("Get resource")
             .path_param("id", "Resource id")
-            .json_response(200, "OK")
-            .json_response(404, "Not found")
+            .json_response_with_schema::<dto::Resource>(openapi, 200, "Resource data")
+            .problem_response(openapi, 404, "Resource not found")
+            .problem_response(openapi, 500, "Internal server error")
             .handler(get(handlers::get_resource))
             .register(router, openapi);
 
         let router = OperationBuilder::post("/resources")
             .operation_id("resources.create")
             .summary("Create resource")
-            .json_response(201, "Created")
-            .json_response(400, "Invalid input")
+            .json_request::<dto::CreateResourceRequest>(openapi, "Resource creation data")
+            .json_response_with_schema::<dto::Resource>(openapi, 201, "Created resource")
+            .problem_response(openapi, 400, "Invalid input data")
+            .problem_response(openapi, 409, "Resource already exists")
+            .problem_response(openapi, 500, "Internal server error")
             .handler(post(handlers::create_resource))
             .register(router, openapi);
 
@@ -139,6 +150,77 @@ impl RestfulModule for MyModule {
 ```
 
 **Builder guarantees:** `register()` only exists once a handler and at least one response are set.
+
+### RFC-9457 Error Handling Integration
+
+The API Ingress module now provides built-in support for RFC-9457 Problem Details:
+
+#### Automatic Problem Schema Registration
+
+The `.problem_response()` helper automatically:
+- Registers the `Problem` schema in OpenAPI components
+- Sets the correct `application/problem+json` content type
+- References the schema in response definitions
+
+#### Handler Implementation
+
+```rust
+use modkit::{ProblemResponse, bad_request, not_found, internal_error};
+use axum::{Json, extract::Path};
+
+async fn get_resource(
+    Path(id): Path<String>
+) -> Result<Json<dto::Resource>, ProblemResponse> {
+    match resource_service.find_by_id(&id).await {
+        Ok(Some(resource)) => Ok(Json(resource.into())),
+        Ok(None) => Err(not_found(format!("Resource '{}' not found", id))),
+        Err(e) => {
+            tracing::error!("Failed to fetch resource: {}", e);
+            Err(internal_error("Resource retrieval failed"))
+        }
+    }
+}
+
+async fn create_resource(
+    Json(req): Json<dto::CreateResourceRequest>
+) -> Result<(StatusCode, Json<dto::Resource>), ProblemResponse> {
+    // Validation
+    if req.name.is_empty() {
+        return Err(bad_request("Resource name is required"));
+    }
+    
+    // Business logic with domain error mapping
+    match resource_service.create(req).await {
+        Ok(resource) => Ok((StatusCode::CREATED, Json(resource.into()))),
+        Err(DomainError::AlreadyExists { name }) => {
+            Err(modkit::conflict(format!("Resource '{}' already exists", name)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to create resource: {}", e);
+            Err(internal_error("Resource creation failed"))
+        }
+    }
+}
+```
+
+#### Generated OpenAPI Response
+
+The `.problem_response()` calls generate proper OpenAPI responses:
+
+```json
+{
+  "400": {
+    "description": "Invalid input data",
+    "content": {
+      "application/problem+json": {
+        "schema": {
+          "$ref": "#/components/schemas/Problem"
+        }
+      }
+    }
+  }
+}
+```
 
 ### Registration flow (sequence)
 

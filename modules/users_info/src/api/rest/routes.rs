@@ -10,6 +10,8 @@ pub fn register_routes(
     openapi: &dyn OpenApiRegistry,
     service: Arc<Service>,
 ) -> anyhow::Result<Router> {
+    // Schemas should be auto-registered via ToSchema when used in operations
+    
     // GET /users - List all users
     router = OperationBuilder::<modkit::api::Missing, modkit::api::Missing, ()>::get("/users")
         .operation_id("users_info.list_users")
@@ -20,7 +22,8 @@ pub fn register_routes(
         .query_param("offset", false, "Number of users to skip")
         .handler(handlers::list_users)
         .json_response_with_schema::<dto::UserListDto>(openapi, 200, "List of users")
-        .json_response(500, "Internal server error")
+        .problem_response(openapi, 400, "Bad Request")
+        .problem_response(openapi, 500, "Internal Server Error")
         .register(router, openapi);
 
     // GET /users/{id} - Get a specific user
@@ -32,8 +35,8 @@ pub fn register_routes(
         .path_param("id", "User UUID")
         .handler(handlers::get_user)
         .json_response_with_schema::<dto::UserDto>(openapi, 200, "User found")
-        .json_response(404, "User not found")
-        .json_response(500, "Internal server error")
+        .problem_response(openapi, 404, "Not Found")
+        .problem_response(openapi, 500, "Internal Server Error")
         .register(router, openapi);
 
     // POST /users - Create a new user
@@ -45,9 +48,9 @@ pub fn register_routes(
         .json_request::<dto::CreateUserReq>(openapi, "User creation data")
         .handler(handlers::create_user)
         .json_response_with_schema::<dto::UserDto>(openapi, 201, "Created user")
-        .json_response(400, "Invalid input data")
-        .json_response(409, "Email already exists")
-        .json_response(500, "Internal server error")
+        .problem_response(openapi, 400, "Bad Request")
+        .problem_response(openapi, 409, "Conflict")
+        .problem_response(openapi, 500, "Internal Server Error")
         .register(router, openapi);
 
     // PUT /users/{id} - Update a user
@@ -60,10 +63,10 @@ pub fn register_routes(
         .json_request::<dto::UpdateUserReq>(openapi, "User update data")
         .handler(handlers::update_user)
         .json_response_with_schema::<dto::UserDto>(openapi, 200, "Updated user")
-        .json_response(400, "Invalid input data")
-        .json_response(404, "User not found")
-        .json_response(409, "Email already exists")
-        .json_response(500, "Internal server error")
+        .problem_response(openapi, 400, "Bad Request")
+        .problem_response(openapi, 404, "Not Found")
+        .problem_response(openapi, 409, "Conflict")
+        .problem_response(openapi, 500, "Internal Server Error")
         .register(router, openapi);
 
     // DELETE /users/{id} - Delete a user
@@ -76,8 +79,8 @@ pub fn register_routes(
             .path_param("id", "User UUID")
             .handler(handlers::delete_user)
             .json_response(204, "User deleted successfully")
-            .json_response(404, "User not found")
-            .json_response(500, "Internal server error")
+            .problem_response(openapi, 404, "Not Found")
+            .problem_response(openapi, 500, "Internal Server Error")
             .register(router, openapi);
 
     router = router.layer(Extension(service.clone()));

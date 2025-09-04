@@ -122,12 +122,13 @@ kill $SERVER_PID
 ```rust
 use modkit::*;
 use serde::{Deserialize, Serialize};
-use axum::{Json, routing::get};
-use schemars::JsonSchema;
+use axum::{Json, routing::get, http::StatusCode};
+use utoipa::ToSchema;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
+#[schema(title = "MyResource")]
 pub struct MyResource {
     pub id: u64,
     pub name: String,
@@ -159,21 +160,19 @@ impl RestfulModule for MyModule {
         &self,
         _ctx: &ModuleCtx,
         router: axum::Router,
-        openapi: &mut dyn modkit::api::OpenApiRegistry,
+        openapi: &dyn modkit::api::OpenApiRegistry,
     ) -> anyhow::Result<axum::Router> {
         use modkit::api::OperationBuilder;
         
-        // Register schema for OpenAPI documentation
-        openapi.register_schema("MyResource", schemars::schema_for!(MyResource));
-        
-        // GET /my-resources - List all resources
+        // GET /my-resources - List all resources with RFC-9457 error handling
         let router = OperationBuilder::get("/my-resources")
             .operation_id("my_module.list")
             .summary("List all resources")
             .description("Retrieve a list of all available resources")
             .tag("my_module")
-            .json_response(200, "List of resources")
-            .json_response(500, "Internal server error")
+            .json_response_with_schema::<Vec<MyResource>>(openapi, 200, "List of resources")
+            .problem_response(openapi, 400, "Bad Request")
+            .problem_response(openapi, 500, "Internal Server Error")
             .handler(get(list_resources_handler))
             .register(router, openapi);
             
@@ -181,14 +180,21 @@ impl RestfulModule for MyModule {
     }
 }
 
-async fn list_resources_handler() -> Json<Vec<MyResource>> {
-    Json(vec![
+async fn list_resources_handler() -> Result<Json<Vec<MyResource>>, modkit::ProblemResponse> {
+    // Simulate potential error conditions
+    let resources = vec![
         MyResource { 
             id: 1, 
             name: "Resource 1".to_string(),
             description: "First resource".to_string()
         }
-    ])
+    ];
+    
+    if resources.is_empty() {
+        return Err(modkit::not_found("No resources available"));
+    }
+    
+    Ok(Json(resources))
 }
 ```
 
@@ -216,9 +222,10 @@ async fn list_resources_handler() -> Json<Vec<MyResource>> {
 
 ### Type-Safe API Development
 - **Type-Safe Builder**: Compile-time guarantees with `OperationBuilder`
-- **Automatic OpenAPI**: Generate documentation from Rust types
-- **Schema Components**: Reusable type definitions with `schemars`
-- **Handler Integration**: Direct Axum handler attachment
+- **Automatic OpenAPI**: Generate documentation from Rust types with `utoipa`
+- **RFC-9457 Error Handling**: Standardized HTTP problem details with `ProblemResponse`
+- **Schema Components**: Reusable type definitions with automatic registration
+- **Handler Integration**: Direct Axum handler attachment with `.problem_response()` helpers
 
 ### Production Ready
 - **Graceful Shutdown**: Proper cleanup with cancellation tokens
@@ -231,6 +238,73 @@ async fn list_resources_handler() -> Json<Vec<MyResource>> {
 - **Interactive Docs**: Stoplight Elements at `/docs` (CDN by default; embedded with `--features embed_elements`)
 - **Health Checks**: Built-in `/health` endpoints
 - **Type Safety**: Compile-time guarantees for API contracts
+
+## 🚨 RFC-9457 Error Handling
+
+HyperSpot implements standardized HTTP error responses using RFC-9457 Problem Details:
+
+### Built-in Problem Types
+
+```rust
+use modkit::{ProblemResponse, Problem, bad_request, not_found, conflict, internal_error};
+
+// Convenience constructors
+let error = bad_request("Invalid email format");
+let error = not_found("User not found");
+let error = conflict("Email already exists");
+let error = internal_error("Database connection failed");
+
+// Custom problem with full control
+let error = ProblemResponse::from(
+    Problem::new(StatusCode::UNPROCESSABLE_ENTITY, "Validation Failed", "Input validation errors")
+        .with_code("VALIDATION_ERROR")
+        .with_instance("/users/create")
+        .with_errors(validation_errors)
+);
+```
+
+### OpenAPI Integration
+
+The `OperationBuilder` provides `.problem_response()` helpers that automatically:
+- Register the `Problem` schema in OpenAPI components
+- Set correct `application/problem+json` content type
+- Reference the schema in response definitions
+
+```rust
+OperationBuilder::post("/users")
+    .json_request::<CreateUserRequest>(openapi, "User data")
+    .json_response_with_schema::<User>(openapi, 201, "User created")
+    .problem_response(openapi, 400, "Validation errors")
+    .problem_response(openapi, 409, "Email already exists")
+    .problem_response(openapi, 500, "Internal server error")
+    .handler(create_user_handler)
+    .register(router, openapi)
+```
+
+### Handler Implementation
+
+```rust
+async fn create_user_handler(
+    Json(req): Json<CreateUserRequest>
+) -> Result<(StatusCode, Json<User>), ProblemResponse> {
+    // Validation
+    if req.email.is_empty() {
+        return Err(bad_request("Email is required"));
+    }
+    
+    // Business logic that may fail
+    match user_service.create_user(req).await {
+        Ok(user) => Ok((StatusCode::CREATED, Json(user))),
+        Err(DomainError::EmailAlreadyExists { email }) => {
+            Err(conflict(format!("Email '{}' is already in use", email)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to create user: {}", e);
+            Err(internal_error("User creation failed"))
+        }
+    }
+}
+```
 
 ## 🔧 Configuration
 

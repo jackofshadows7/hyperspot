@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
-use schemars::JsonSchema;
+use utoipa::ToSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::contract::model::{NewUser, User, UserPatch};
 
-/// REST DTO for user representation with serde/schemars
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// REST DTO for user representation with serde/utoipa
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserDto {
     pub id: Uuid,
     pub email: String,
@@ -16,21 +16,21 @@ pub struct UserDto {
 }
 
 /// REST DTO for creating a new user
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateUserReq {
     pub email: String,
     pub display_name: String,
 }
 
 /// REST DTO for updating a user (partial)
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct UpdateUserReq {
     pub email: Option<String>,
     pub display_name: Option<String>,
 }
 
 /// REST DTO for user list response
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UserListDto {
     pub users: Vec<UserDto>,
     pub total: usize,
@@ -39,7 +39,7 @@ pub struct UserListDto {
 }
 
 /// REST DTO for query parameters
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ListUsersQuery {
     pub limit: Option<u32>,
     pub offset: Option<u32>,

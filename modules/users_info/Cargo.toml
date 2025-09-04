@@ -7,15 +7,14 @@ edition = "2021"
 # Core dependencies
 anyhow = "1.0"
 async-trait = "0.1"
-tokio = { version = "1.0", features = ["full"] }
-tokio-util = "0.7"
+tokio = { version = "1.47", features = ["full"] }
 tracing = "0.1"
 inventory = "0.3"
 
 # Serde and JSON schema
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+utoipa = { workspace = true }
 
 # HTTP and REST
 axum = { workspace = true, features = ["macros"] }
@@ -24,13 +23,13 @@ axum = { workspace = true, features = ["macros"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # UUID support
-uuid = { version = "1.0", features = ["v4", "serde"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }
 
 # Lock-free atomic swaps
 arc-swap = "1.7"
 
 # Database - SeaORM
-sea-orm = { version = "1.0", features = [
+sea-orm = { version = "1.1", features = [
     "sqlx-sqlite", 
     "runtime-tokio-rustls", 
     "macros", 
@@ -40,7 +39,7 @@ sea-orm = { version = "1.0", features = [
 sea-orm-migration = "1.0"
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Local dependencies
 modkit = { path = "../../libs/modkit" }
@@ -48,4 +47,4 @@ db = { path = "../../libs/db" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-tokio-test = "0.4"
+

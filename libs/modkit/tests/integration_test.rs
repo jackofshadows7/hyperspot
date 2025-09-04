@@ -19,14 +19,16 @@ impl OpenApiRegistry for TestRegistry {
         self.operations.lock().unwrap().push(spec.clone());
     }
 
-    fn register_schema(&self, _name: &str, _schema: schemars::schema::RootSchema) {
-        // Test implementation - schemas not tracked
+    fn ensure_schema_raw(&self, name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+        // Test implementation - return the schema name
+        name.to_string()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
+
 
 impl TestRegistry {
     fn get_operations(&self) -> Vec<OperationSpec> {
@@ -214,3 +216,4 @@ fn test_parameter_types() {
     assert_eq!(required_param.location, ParamLocation::Query);
     assert!(required_param.required);
 }
+

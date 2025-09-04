@@ -8,5 +8,5 @@ pub mod operation_builder;
 
 pub use operation_builder::{
     state, Missing, OpenApiRegistry, OperationBuilder, OperationSpec, ParamLocation, ParamSpec,
-    Present, ResponseSpec,
+    Present, ResponseSpec, ensure_schema,
 };

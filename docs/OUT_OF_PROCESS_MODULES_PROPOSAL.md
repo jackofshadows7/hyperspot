@@ -182,11 +182,13 @@ pub fn register_routes(
 ) -> anyhow::Result<()> {
     use modkit::api::OperationBuilder;
 
-    reg.register_schema("Item", schemars::schema_for!(dto::Item));
+    // Schemas are automatically registered via OperationBuilder methods
 
     OperationBuilder::get("/items/{id}")
         .operation_id("mymodule.get_item")
-        .json_response(200, "OK")
+        .json_response_with_schema::<dto::Item>(&reg, 200, "Item details")
+        .problem_response(&reg, 404, "Item not found")
+        .problem_response(&reg, 500, "Internal server error")
         .handler(disp.bind("mymodule.get_item", handlers::get_item)) // <-- local fn
         .register_remote(&mut reg);
 
@@ -377,8 +379,10 @@ pub struct RemoteOpenApiRegistry {
 }
 
 impl OpenApiRegistry for RemoteOpenApiRegistry {
-    fn register_schema(&mut self, name: &str, schema: schemars::schema::RootSchema) {
-        self.openapi.add_schema(name, schema);
+    fn ensure_schema_raw(&self, name: &str, schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+        // Forward schema registration to ingress via gRPC
+        self.forward_schemas_to_ingress(name, schemas);
+        name.to_string()
     }
     fn register_operation(&mut self, op: &OperationSpec) {
         self.openapi.add_operation(op);
@@ -502,3 +506,12 @@ No changes for **consumers** of your module’s typed client.
 ---
 
 **Bottom line:** OoP modules keep the ModKit programming model intact—**same OperationBuilder, same handlers, same typed clients**—while gaining process-level isolation and independent deployability (within wire-compatibility bounds). The ingress remains your single HTTP entrypoint; modules register REST remotely and stream results efficiently over a thin gRPC bridge.
+
+### RFC-9457 Error Handling Compatibility
+
+OoP modules maintain full compatibility with the centralized RFC-9457 error handling:
+
+- **Same `ProblemResponse` types**: OoP modules use the same error response types as in-process modules
+- **Automatic Schema Registration**: The `Problem` schema is automatically registered and shared across all modules
+- **Consistent Error Responses**: All modules (in-process and OoP) return standardized HTTP problem details
+- **gRPC Error Mapping**: Domain errors are properly mapped to `ProblemResponse` before transmission over gRPC

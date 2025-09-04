@@ -538,7 +538,6 @@ impl<T: Runnable> Drop for WithLifecycle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
     use std::sync::atomic::{AtomicU32, Ordering as AOrd};
     use tokio::time::{sleep, Duration};
 

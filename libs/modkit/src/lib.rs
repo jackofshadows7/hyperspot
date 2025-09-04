@@ -49,6 +49,13 @@ pub mod contracts;
 pub mod api;
 pub use api::{OpenApiRegistry, OperationBuilder};
 
+// HTTP utilities
+pub mod http;
+pub use http::problem::{
+    Problem, ProblemResponse, ValidationError,
+    bad_request, conflict, internal_error, not_found,
+};
+
 pub mod lifecycle;
 pub mod runtime;
 

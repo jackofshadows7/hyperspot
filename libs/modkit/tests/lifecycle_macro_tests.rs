@@ -1,6 +1,5 @@
 use anyhow::Result;
 use modkit::{lifecycle as lifecycle_attr, lifecycle::*, StatefulModule};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 

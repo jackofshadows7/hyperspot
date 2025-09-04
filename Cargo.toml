@@ -44,7 +44,7 @@ tower-http = { version = "0.6", features = ["trace", "request-id", "cors", "limi
 uuid = { version = "1.7", features = ["v4", "serde"] }
 
 # OpenAPI documentation (only for api_ingress)
-schemars = "0.8"
+utoipa = { version = "5", features = ["macros", "openapi_extensions", "chrono", "uuid"] }
 
 # Synchronous locks for better performance
 parking_lot = "0.12"

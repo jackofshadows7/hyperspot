@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// Pure user model for inter-module communication (no serde/schemars)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub id: Uuid,

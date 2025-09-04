@@ -8,13 +8,22 @@ use anyhow::Result;
 use axum::http::Method;
 use axum::{middleware::from_fn, routing::get, Router};
 use modkit::api::OpenApiRegistry;
+use modkit::http::problem;
 use modkit::lifecycle::ReadySignal;
 use parking_lot::Mutex;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use utoipa::openapi::{
+    OpenApi, OpenApiBuilder,
+    info::InfoBuilder,
+    path::{PathsBuilder, PathItemBuilder, OperationBuilder as UOperationBuilder, ParameterBuilder, ParameterIn, HttpMethod},
+    request_body::RequestBodyBuilder,
+    response::{ResponseBuilder, ResponsesBuilder},
+    content::ContentBuilder,
+    schema::{ComponentsBuilder, Schema, ObjectBuilder, SchemaType, SchemaFormat},
+    RefOr, Ref, Required,
+};
 use tower_http::{
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
@@ -27,7 +36,6 @@ mod assets;
 mod config;
 pub mod error;
 mod model;
-mod openapi;
 pub mod request_id;
 mod router_cache;
 mod web;
@@ -39,45 +47,6 @@ use router_cache::RouterCache;
 pub mod example_user_module;
 
 use model::ComponentsRegistry;
-
-/// Standard API error response (TODO: good to register in OpenAPI once and reuse)
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
-pub struct ErrorResponse {
-    /// Error message
-    pub error: String,
-    /// HTTP status code
-    pub code: u16,
-    /// RFC3339 timestamp when the error occurred
-    pub timestamp: String,
-    /// Optional request ID for tracking
-    pub request_id: Option<String>,
-}
-
-impl ErrorResponse {
-    /// Create a new error response
-    pub fn new(error: impl Into<String>, code: u16) -> Self {
-        Self {
-            error: error.into(),
-            code,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            request_id: None,
-        }
-    }
-
-    /// Create an error response with request ID
-    pub fn with_request_id(
-        error: impl Into<String>,
-        code: u16,
-        request_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            error: error.into(),
-            code,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            request_id: Some(request_id.into()),
-        }
-    }
-}
 
 /// Main API Ingress module — owns the HTTP server (rest_host) and collects
 /// typed operation specs to emit a single OpenAPI document.
@@ -130,32 +99,6 @@ impl ApiIngress {
             operation_specs: DashMap::new(),
             ..Default::default()
         }
-    }
-
-    /// Short helper: take the last path segment of a fully-qualified Rust type name.
-    /// Example: "my_crate::foo::BarDto" -> "BarDto"
-    fn short_from_fqn(fqn: &str) -> &str {
-        fqn.rsplit("::").next().unwrap_or(fqn)
-    }
-
-    /// Decide under which **component key** we store a RootSchema so that schemars'
-    /// internal `$ref` (which uses `title` or a short name) resolves without rewrites.
-    ///
-    /// Priority:
-    /// 1) schema.metadata.title if present & non-empty
-    /// 2) short name from the provided `fqn_hint`
-    fn pick_component_key(fqn_hint: &str, schema: &schemars::schema::RootSchema) -> String {
-        if let Some(title) = schema
-            .schema
-            .metadata
-            .as_ref()
-            .and_then(|m| m.title.clone())
-        {
-            if !title.trim().is_empty() {
-                return title;
-            }
-        }
-        Self::short_from_fqn(fqn_hint).to_string()
     }
 
     /// Get the current configuration (cheap clone from ArcSwap)
@@ -230,227 +173,153 @@ impl ApiIngress {
         Ok(router)
     }
 
-    /// Build a schema value for content type + optional component name.
-    ///
-    /// Strategy:
-    /// - If `schema_name` provided, try exact key; if missing, try its short form.
-    /// - Otherwise emit a minimal inline schema by content type (keeps UI happy).
-    fn make_schema(
-        components: &crate::model::ComponentsRegistry,
-        content_type: &str,
-        schema_name: Option<&str>,
-    ) -> serde_json::Value {
-        if let Some(name) = schema_name {
-            if components.schemas.contains_key(name) {
-                return serde_json::json!({ "$ref": format!("#/components/schemas/{name}") });
-            }
-            if let Some(short) = name.rsplit("::").next() {
-                if components.schemas.contains_key(short) {
-                    return serde_json::json!({ "$ref": format!("#/components/schemas/{short}") });
-                }
-            }
-        }
-        match content_type {
-            "application/json" => serde_json::json!({ "type": "object" }),
-            "text/plain" | "text/html" => serde_json::json!({ "type": "string" }),
-            _ => serde_json::json!({}), // free-form
-        }
-    }
 
-    /// Build the "content" object for a single media type and optional schema name.
-    /// If schema_name is None, we still emit an empty schema object to satisfy OAS UI.
-    fn make_content_obj(
-        components: &crate::model::ComponentsRegistry,
-        content_type: &str,
-        schema_name: &Option<String>,
-    ) -> serde_json::Value {
-        let mut content_type_obj = serde_json::Map::new();
-        let schema_value = Self::make_schema(components, content_type, schema_name.as_deref());
-        content_type_obj.insert("schema".to_string(), schema_value);
-
-        let mut content = serde_json::Map::new();
-        content.insert(
-            content_type.to_string(),
-            serde_json::Value::Object(content_type_obj),
-        );
-        serde_json::Value::Object(content)
-    }
-
-    /// Build OpenAPI specification from registered routes and components.
-    pub fn build_openapi(&self) -> Result<crate::openapi::OpenApi> {
-        let components_registry = self.components_registry.load();
-
+    /// Build OpenAPI specification from registered routes and components using utoipa.
+    pub fn build_openapi(&self) -> Result<OpenApi> {
         // Log operation count for visibility
         let op_count = self.operation_specs.len();
         tracing::info!("Building OpenAPI: found {op_count} registered operations");
 
-        // Build paths map from stored operation specs
-        let mut paths_map: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, serde_json::Value>,
-        > = std::collections::BTreeMap::new();
+        // 1) Paths
+        let mut paths = PathsBuilder::new();
 
-        for spec_entry in self.operation_specs.iter() {
-            let spec = spec_entry.value();
-            let method = spec.method.as_str().to_lowercase();
-            let path = &spec.path;
+        for spec in self.operation_specs.iter().map(|e| e.value().clone()) {
+            let mut op = UOperationBuilder::new()
+                .operation_id(spec.operation_id.clone().or(Some(spec.handler_id.clone())))
+                .summary(spec.summary.clone())
+                .description(spec.description.clone());
 
-            // Create operation object
-            let mut operation = serde_json::Map::new();
-
-            // Prefer explicit operation_id, fallback to handler_id
-            let op_id = spec
-                .operation_id
-                .clone()
-                .unwrap_or_else(|| spec.handler_id.clone());
-            operation.insert("operationId".to_string(), serde_json::Value::String(op_id));
-
-            if let Some(summary) = &spec.summary {
-                operation.insert(
-                    "summary".to_string(),
-                    serde_json::Value::String(summary.clone()),
-                );
+            for tag in &spec.tags {
+                op = op.tag(tag.clone());
             }
-
-            if let Some(description) = &spec.description {
-                operation.insert(
-                    "description".to_string(),
-                    serde_json::Value::String(description.clone()),
-                );
-            }
-
-            if !spec.tags.is_empty() {
-                let tags: Vec<serde_json::Value> = spec
-                    .tags
-                    .iter()
-                    .map(|tag| serde_json::Value::String(tag.clone()))
-                    .collect();
-                operation.insert("tags".to_string(), serde_json::Value::Array(tags));
-            }
-
-            // Request body (if any)
-            if let Some(req) = &spec.request_body {
-                let mut rb = serde_json::Map::new();
-                if let Some(desc) = &req.description {
-                    rb.insert(
-                        "description".to_string(),
-                        serde_json::Value::String(desc.clone()),
-                    );
-                }
-
-                let content = Self::make_content_obj(
-                    &components_registry,
-                    req.content_type,
-                    &req.schema_name,
-                );
-                rb.insert("content".to_string(), content);
-
-                operation.insert("requestBody".to_string(), serde_json::Value::Object(rb));
-            }
-
-            // Responses (always emit content including application/json)
-            let mut responses = serde_json::Map::new();
-            for response_spec in &spec.responses {
-                let mut response_obj = serde_json::Map::new();
-                response_obj.insert(
-                    "description".to_string(),
-                    serde_json::Value::String(response_spec.description.clone()),
-                );
-
-                let content = Self::make_content_obj(
-                    &components_registry,
-                    response_spec.content_type,
-                    &response_spec.schema_name,
-                );
-                response_obj.insert("content".to_string(), content);
-
-                responses.insert(
-                    response_spec.status.to_string(),
-                    serde_json::Value::Object(response_obj),
-                );
-            }
-            operation.insert(
-                "responses".to_string(),
-                serde_json::Value::Object(responses),
-            );
 
             // Parameters
-            if !spec.params.is_empty() {
-                let parameters: Vec<serde_json::Value> = spec
-                    .params
-                    .iter()
-                    .map(|param_spec| {
-                        let mut param = serde_json::Map::new();
-                        param.insert(
-                            "name".to_string(),
-                            serde_json::Value::String(param_spec.name.clone()),
-                        );
+            for p in &spec.params {
+                let in_ = match p.location {
+                    modkit::api::ParamLocation::Path => ParameterIn::Path,
+                    modkit::api::ParamLocation::Query => ParameterIn::Query,
+                    modkit::api::ParamLocation::Header => ParameterIn::Header,
+                    modkit::api::ParamLocation::Cookie => ParameterIn::Cookie,
+                };
+                let required = if matches!(p.location, modkit::api::ParamLocation::Path) || p.required {
+                    Required::True
+                } else {
+                    Required::False
+                };
 
-                        let location_str = match param_spec.location {
-                            modkit::api::ParamLocation::Path => "path",
-                            modkit::api::ParamLocation::Query => "query",
-                            modkit::api::ParamLocation::Header => "header",
-                            modkit::api::ParamLocation::Cookie => "cookie",
-                        };
-                        param.insert(
-                            "in".to_string(),
-                            serde_json::Value::String(location_str.to_string()),
-                        );
+                let schema_type = match p.param_type.as_str() {
+                    "integer" => SchemaType::Type(utoipa::openapi::schema::Type::Integer),
+                    "number"  => SchemaType::Type(utoipa::openapi::schema::Type::Number),
+                    "boolean" => SchemaType::Type(utoipa::openapi::schema::Type::Boolean),
+                    _         => SchemaType::Type(utoipa::openapi::schema::Type::String),
+                };
+                let schema = Schema::Object(ObjectBuilder::new().schema_type(schema_type).build());
 
-                        // OpenAPI requires all path params to be required.
-                        let is_required = match param_spec.location {
-                            modkit::api::ParamLocation::Path => true,
-                            _ => param_spec.required,
-                        };
-                        param.insert("required".to_string(), serde_json::Value::Bool(is_required));
+                let param = ParameterBuilder::new()
+                    .name(&p.name)
+                    .parameter_in(in_)
+                    .required(required)
+                    .description(p.description.clone())
+                    .schema(Some(schema))
+                    .build();
 
-                        if let Some(description) = &param_spec.description {
-                            param.insert(
-                                "description".to_string(),
-                                serde_json::Value::String(description.clone()),
-                            );
-                        }
-
-                        // TODO: consider a `format` field in ParamSpec (e.g., "uuid") and map it here.
-                        param.insert(
-                            "schema".to_string(),
-                            serde_json::json!({ "type": param_spec.param_type }),
-                        );
-
-                        serde_json::Value::Object(param)
-                    })
-                    .collect();
-
-                operation.insert(
-                    "parameters".to_string(),
-                    serde_json::Value::Array(parameters),
-                );
+                op = op.parameter(param);
             }
 
-            // Merge into paths map
-            let path_entry = paths_map.entry(path.clone()).or_default();
-            path_entry.insert(method, serde_json::Value::Object(operation));
+            // Request body
+            if let Some(rb) = &spec.request_body {
+                let content = if let Some(name) = &rb.schema_name {
+                    ContentBuilder::new()
+                        .schema(Some(RefOr::Ref(Ref::from_schema_name(name.clone()))))
+                        .build()
+                } else {
+                    ContentBuilder::new()
+                        .schema(Some(Schema::Object(ObjectBuilder::new().build())))
+                        .build()
+                };
+                let mut rbld = RequestBodyBuilder::new()
+                    .description(rb.description.clone())
+                    .content(rb.content_type.to_string(), content);
+                if rb.required { rbld = rbld.required(Some(Required::True)); }
+                op = op.request_body(Some(rbld.build()));
+            }
+
+            // Responses
+            let mut responses = ResponsesBuilder::new();
+            for r in &spec.responses {
+                let is_json_like = r.content_type == "application/json" 
+                    || r.content_type == problem::APPLICATION_PROBLEM_JSON;
+                let resp = if is_json_like {
+                    if let Some(name) = &r.schema_name {
+                        // Manually build content to preserve the correct content type
+                        let content = ContentBuilder::new()
+                            .schema(Some(RefOr::Ref(
+                                Ref::new(format!("#/components/schemas/{}", name))
+                            )))
+                            .build();
+                        ResponseBuilder::new()
+                            .description(&r.description)
+                            .content(r.content_type, content)
+                            .build()
+                    } else {
+                        let content = ContentBuilder::new()
+                            .schema(Some(Schema::Object(ObjectBuilder::new().build())))
+                            .build();
+                        ResponseBuilder::new()
+                            .description(&r.description)
+                            .content(r.content_type, content)
+                            .build()
+                    }
+                } else {
+                    let schema = Schema::Object(
+                        ObjectBuilder::new()
+                            .schema_type(SchemaType::Type(utoipa::openapi::schema::Type::String))
+                            .format(Some(SchemaFormat::Custom(r.content_type.into())))
+                            .build()
+                    );
+                    let content = ContentBuilder::new().schema(Some(schema)).build();
+                    ResponseBuilder::new()
+                        .description(&r.description)
+                        .content(r.content_type, content)
+                        .build()
+                };
+                responses = responses.response(r.status.to_string(), resp);
+            }
+            op = op.responses(responses.build());
+
+            let method = match spec.method {
+                Method::GET    => HttpMethod::Get,
+                Method::POST   => HttpMethod::Post,
+                Method::PUT    => HttpMethod::Put,
+                Method::DELETE => HttpMethod::Delete,
+                Method::PATCH  => HttpMethod::Patch,
+                _ => HttpMethod::Get,
+            };
+
+            let item = PathItemBuilder::new().operation(method, op.build()).build();
+            paths = paths.path(spec.path.clone(), item);
         }
 
-        let paths = serde_json::to_value(paths_map)?;
-
-        // Components: schemas that were registered via OpenApiRegistry
-        let mut components = openapi::OpenApiComponents::default();
-        for (name, schema) in &components_registry.schemas {
-            let schema_value = serde_json::to_value(schema)?;
-            components.schemas.insert(name.clone(), schema_value);
+        // 2) Components (from our registry)
+        let mut components = ComponentsBuilder::new();
+        for (name, schema) in self.components_registry.load().iter() {
+            components = components.schema(name.clone(), schema.clone());
         }
 
-        Ok(openapi::OpenApi {
-            openapi: "3.0.3",
-            info: openapi::OpenApiInfo {
-                title: "HyperSpot API",
-                version: "0.1.0".to_string(),
-                description: Some("HyperSpot Server API Documentation"),
-            },
-            paths,
-            components: Some(components),
-        })
+        // 3) Info & final OpenAPI doc
+        let info = InfoBuilder::new()
+            .title("HyperSpot API")
+            .version("0.1.0")
+            .description(Some("HyperSpot Server API Documentation"))
+            .build();
+
+        let openapi = OpenApiBuilder::new()
+            .info(info)
+            .paths(paths.build())
+            .components(Some(components.build()))
+            .build();
+
+        Ok(openapi)
     }
 
     /// Background HTTP server: bind, notify ready, serve until cancelled.
@@ -554,6 +423,25 @@ mod tests {
             panic!("Failed to downcast to ApiIngress - module not registered correctly");
         }
     }
+
+    #[test] 
+    fn test_openapi_generation() {
+        let api_ingress = ApiIngress::default();
+        
+        // Test that we can build OpenAPI without any operations
+        let doc = api_ingress.build_openapi().unwrap();
+        let json = serde_json::to_value(&doc).unwrap();
+        
+        // Verify it's valid OpenAPI document structure
+        assert!(json.get("openapi").is_some());
+        assert!(json.get("info").is_some());
+        assert!(json.get("paths").is_some());
+        
+        // Verify info section
+        let info = json.get("info").unwrap();
+        assert_eq!(info.get("title").unwrap(), "HyperSpot API");
+        assert_eq!(info.get("version").unwrap(), "0.1.0");
+    }
 }
 
 // REST host role: prepare/finalize the router, but do not start the server here.
@@ -586,17 +474,16 @@ impl modkit::contracts::RestHostModule for ApiIngress {
                 op_count
             );
 
-            let openapi_value = Arc::new(serde_json::to_value(self.build_openapi()?)?);
+            let openapi_doc = Arc::new(self.build_openapi()?);
 
             router = router
                 .route(
                     "/openapi.json",
                     get({
-                        use axum::{http::header, response::IntoResponse};
-                        let v = openapi_value.clone();
+                        use axum::{http::header, response::IntoResponse, Json};
+                        let doc = openapi_doc.clone();
                         move || async move {
-                            let json = axum::Json((*v).clone());
-                            ([(header::CACHE_CONTROL, "no-store")], json).into_response()
+                            ([(header::CACHE_CONTROL, "no-store")], Json(doc.as_ref())).into_response()
                         }
                     }),
                 )
@@ -678,60 +565,82 @@ impl OpenApiRegistry for ApiIngress {
         );
     }
 
-    fn register_schema(&self, name: &str, schema: schemars::schema::RootSchema) {
-        // Snapshot current registry, copy-on-write
+    fn ensure_schema_raw(&self, root_name: &str, schemas: Vec<(String, RefOr<Schema>)>) -> String {
+        // Snapshot & copy-on-write
         let current = self.components_registry.load();
         let mut reg = (**current).clone();
 
-        // Select stable component key: title or short FQN
-        let mut key = Self::pick_component_key(name, &schema);
-
-        // Normalize to JSON for content comparison
-        let new_json = match serde_json::to_value(&schema) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(%name, %key, error=%e, "Failed to serialize schema to JSON");
-                return;
+        for (name, schema) in schemas {
+            // Conflict policy: identical → no-op; different → warn & override
+            if let Some(existing) = reg.get(&name) {
+                let a = serde_json::to_value(existing).ok();
+                let b = serde_json::to_value(&schema).ok();
+                if a == b {
+                    continue; // Skip identical schemas
+                } else {
+                    tracing::warn!(%name, "Schema content conflict; overriding with latest");
+                }
             }
-        };
-
-        if let Some(existing) = reg.schemas.get(&key) {
-            // There is already a schema with this key - compare content
-            let Ok(existing_json) = serde_json::to_value(existing) else {
-                tracing::error!(%name, %key, "Existing schema failed to serialize; keeping existing, skipping new");
-                return;
-            };
-
-            if existing_json == new_json {
-                // Full duplicates - do not override, to avoid bloating components
-                tracing::warn!(
-                    original = %name,
-                    key = %key,
-                    "Schema already registered with identical content; reusing existing"
-                );
-                // Do nothing
-            } else {
-                // Conflict of different schemas under the same key - consider it an authorization error
-                tracing::error!(
-                    original = %name,
-                    key = %key,
-                    "Conflicting schema content under the same component key; keeping the first and ignoring the new one"
-                );
-                // TODO: handle this case as an error
-            }
-        } else {
-            // No conflicts - register under the selected key
-            reg.register_schema(key.clone(), schema);
-            tracing::debug!(original = %name, used_key = %key, "Registered schema");
-            self.components_registry.store(Arc::new(reg));
-            return;
+            reg.insert_schema(name, schema);
         }
 
-        // If we got here - nothing changed (duplicate or conflict), but still need to store a copy
         self.components_registry.store(Arc::new(reg));
+        root_name.to_string()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod problem_openapi_tests {
+    use super::*;
+    use axum::Json;
+    use serde_json::Value;
+    use modkit::api::{OperationBuilder, Missing};
+
+    async fn dummy_handler() -> Json<Value> {
+        Json(serde_json::json!({"ok": true}))
+    }
+
+    #[tokio::test]
+    async fn openapi_includes_problem_schema_and_response() {
+        let api = ApiIngress::default();
+        let router = axum::Router::new();
+
+        // Build a route with a problem+json response
+        let _router = OperationBuilder::<Missing, Missing, ()>::get("/problem-demo")
+            .summary("Problem demo")
+            .problem_response(&api, 400, "Bad Request") // <-- registers Problem + sets content type
+            .handler(dummy_handler)
+            .register(router, &api);
+
+        let doc = api.build_openapi().expect("openapi");
+        let v = serde_json::to_value(&doc).expect("json");
+
+        // 1) Problem exists in components.schemas
+        let problem = v.pointer("/components/schemas/Problem")
+            .expect("Problem schema missing");
+        assert!(problem.get("$ref").is_none(), "Problem must be a real object, not a self-ref");
+
+        // 2) Response under /paths/... references Problem and has correct media type
+        let path_obj = v.pointer("/paths/~1problem-demo/get/responses/400")
+            .expect("400 response missing");
+        
+        // Check what content types exist
+        let content_obj = path_obj.get("content").expect("content object missing");
+        if !content_obj.get("application/problem+json").is_some() {
+            // Print available content types for debugging
+            panic!("application/problem+json content missing. Available content: {}", serde_json::to_string_pretty(content_obj).unwrap());
+        }
+        
+        let content = path_obj.pointer("/content/application~1problem+json")
+            .expect("application/problem+json content missing");
+        // $ref to Problem
+        let schema_ref = content.pointer("/schema/$ref")
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        assert_eq!(schema_ref, "#/components/schemas/Problem");
     }
 }

@@ -8,15 +8,15 @@ use axum::{
     routing::get,
     Router,
 };
-use schemars::JsonSchema;
+use utoipa::ToSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use modkit::contracts::{Module, OpenApiRegistry, RestfulModule};
 
 // --- Models ---
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
+#[schema(title = "User")]
 pub struct User {
     pub id: u32,
     pub name: String,
@@ -25,7 +25,8 @@ pub struct User {
     pub is_active: bool,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Debug)]
+#[schema(title = "UserListResponse")]
 pub struct UserListResponse {
     pub users: Vec<User>,
     pub total: u32,
@@ -33,7 +34,8 @@ pub struct UserListResponse {
     pub offset: u32,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Debug)]
+#[schema(title = "CreateUserRequest")]
 pub struct CreateUserRequest {
     pub name: String,
     pub email: String,
@@ -95,12 +97,7 @@ impl RestfulModule for UserModule {
         use modkit::api::OperationBuilder;
 
         // Schemas
-        openapi.register_schema("User", schemars::schema_for!(User));
-        openapi.register_schema("UserListResponse", schemars::schema_for!(UserListResponse));
-        openapi.register_schema(
-            "CreateUserRequest",
-            schemars::schema_for!(CreateUserRequest),
-        );
+        // Schemas are now auto-registered via utoipa ToSchema when used in operations
 
         // GET /users — list
         let router = OperationBuilder::get("/users")

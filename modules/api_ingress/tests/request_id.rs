@@ -119,22 +119,15 @@ async fn success_handler(
     Json(json!({"status": "ok", "request_id": request_id}))
 }
 
-#[derive(serde::Serialize)]
-struct TestErrorResponse {
-    error: String,
-    code: u16,
-    request_id: String,
-}
-
 async fn error_handler(
     Extension(XRequestId(request_id)): Extension<XRequestId>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<TestErrorResponse>)> {
-    Err((
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(TestErrorResponse {
-            error: "Test error".to_string(),
-            code: 500,
-            request_id,
-        }),
-    ))
+        Json(json!({
+            "error": "Test error",
+            "code": 500,
+            "request_id": request_id
+        }))
+    )
 }

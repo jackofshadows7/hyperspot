@@ -15,6 +15,8 @@ use axum::{handler::Handler, routing::MethodRouter, Router};
 use http::Method;
 use std::marker::PhantomData;
 
+use crate::http::problem;
+
 /// Type-state markers for compile-time enforcement
 pub mod state {
     /// Marker for missing required components
@@ -89,18 +91,34 @@ pub trait OpenApiRegistry {
     /// Register an API operation specification
     fn register_operation(&self, spec: &OperationSpec);
 
-    /// Register a schema component for OpenAPI documentation.
-    ///
-    /// Schema components are shared type definitions that can be referenced in
-    /// request/response specifications using `$ref`.
-    ///
-    /// # Arguments
-    /// * `name` - Unique name for the schema component
-    /// * `schema` - JSON Schema definition generated from Rust types
-    fn register_schema(&self, name: &str, schema: schemars::schema::RootSchema);
+    /// Ensure schema for `T` (including transitive dependencies) is registered
+    /// under components and return the canonical component name for `$ref`.
+    /// This is a type-erased version for dyn compatibility.
+    fn ensure_schema_raw(&self, name: &str, schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String;
 
     /// Downcast support for accessing the concrete implementation if needed.
     fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// Helper function to call ensure_schema with proper type information
+pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(registry: &dyn OpenApiRegistry) -> String {
+    use utoipa::PartialSchema;
+    use utoipa::openapi::RefOr;
+
+    // 1) Canonical component name for T as seen by utoipa
+    let root_name = T::name().to_string();
+
+    // 2) Always insert T's own schema first (actual object, not a ref)
+    //    This avoids self-referential components.
+    let mut collected: Vec<(String, RefOr<utoipa::openapi::schema::Schema>)> = vec![
+        (root_name.clone(), <T as PartialSchema>::schema()),
+    ];
+
+    // 3) Collect and append all referenced schemas (dependencies) of T
+    T::schemas(&mut collected);
+
+    // 4) Pass to registry for insertion
+    registry.ensure_schema_raw(&root_name, collected)
 }
 
 /// Type-safe operation builder with compile-time guarantees.
@@ -273,18 +291,17 @@ impl<H, R, S> OperationBuilder<H, R, S> {
         self
     }
 
-    /// Attach a JSON request body and auto-register its schema using `schemars`.
+    /// Attach a JSON request body and auto-register its schema using `utoipa`.
     /// This variant sets a description (`Some(desc)`) and marks the body as **required**.
-    pub fn json_request<T>(mut self, openapi: &dyn OpenApiRegistry, desc: impl Into<String>) -> Self
+    pub fn json_request<T>(mut self, registry: &dyn OpenApiRegistry, desc: impl Into<String>) -> Self
     where
-        T: schemars::JsonSchema + 'static,
+        T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
     {
-        let name = std::any::type_name::<T>();
-        openapi.register_schema(name, schemars::schema_for!(T));
+        let name = ensure_schema::<T>(registry);
         self.spec.request_body = Some(RequestBodySpec {
             content_type: "application/json",
             description: Some(desc.into()),
-            schema_name: Some(name.to_string()),
+            schema_name: Some(name),
             required: true,
         });
         self
@@ -292,16 +309,15 @@ impl<H, R, S> OperationBuilder<H, R, S> {
 
     /// Attach a JSON request body (auto-register schema) with **no** description (`None`).
     /// Marks the body as **required**.
-    pub fn json_request_no_desc<T>(mut self, openapi: &dyn OpenApiRegistry) -> Self
+    pub fn json_request_no_desc<T>(mut self, registry: &dyn OpenApiRegistry) -> Self
     where
-        T: schemars::JsonSchema + 'static,
+        T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
     {
-        let name = std::any::type_name::<T>();
-        openapi.register_schema(name, schemars::schema_for!(T));
+        let name = ensure_schema::<T>(registry);
         self.spec.request_body = Some(RequestBodySpec {
             content_type: "application/json",
             description: None,
-            schema_name: Some(name.to_string()),
+            schema_name: Some(name),
             required: true,
         });
         self
@@ -400,19 +416,21 @@ impl<H, S> OperationBuilder<H, Missing, S> {
     }
 
     /// Add a JSON response with a registered schema (transitions from Missing to Present).
-    pub fn json_response_with_schema<T: schemars::JsonSchema + 'static>(
+    pub fn json_response_with_schema<T>(
         mut self,
-        openapi: &dyn OpenApiRegistry,
+        registry: &dyn OpenApiRegistry,
         status: u16,
         description: impl Into<String>,
-    ) -> OperationBuilder<H, Present, S> {
-        let name = std::any::type_name::<T>();
-        openapi.register_schema(name, schemars::schema_for!(T));
+    ) -> OperationBuilder<H, Present, S> 
+    where
+        T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
+    {
+        let name = ensure_schema::<T>(registry);
         self.spec.responses.push(ResponseSpec {
             status,
             content_type: "application/json",
             description: description.into(),
-            schema_name: Some(name.to_string()),
+            schema_name: Some(name),
         });
         OperationBuilder {
             spec: self.spec,
@@ -464,6 +482,30 @@ impl<H, S> OperationBuilder<H, Missing, S> {
             _state: self._state,
         }
     }
+
+    /// Add an RFC 9457 `application/problem+json` response (transitions from Missing to Present).
+    pub fn problem_response(
+        mut self,
+        registry: &dyn OpenApiRegistry,
+        status: u16,
+        description: impl Into<String>,
+    ) -> OperationBuilder<H, Present, S> {
+        // Ensure `Problem` schema is registered in components
+        let problem_name = ensure_schema::<crate::http::problem::Problem>(registry);
+        self.spec.responses.push(ResponseSpec {
+            status,
+            content_type: problem::APPLICATION_PROBLEM_JSON,
+            description: description.into(),
+            schema_name: Some(problem_name),
+        });
+        OperationBuilder {
+            spec: self.spec,
+            method_router: self.method_router,
+            _has_handler: self._has_handler,
+            _has_response: PhantomData::<Present>,
+            _state: self._state,
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -482,19 +524,21 @@ impl<H, S> OperationBuilder<H, Present, S> {
     }
 
     /// Add a JSON response with a registered schema (additional).
-    pub fn json_response_with_schema<T: schemars::JsonSchema + 'static>(
+    pub fn json_response_with_schema<T>(
         mut self,
-        openapi: &dyn OpenApiRegistry,
+        registry: &dyn OpenApiRegistry,
         status: u16,
         description: impl Into<String>,
-    ) -> Self {
-        let name = std::any::type_name::<T>();
-        openapi.register_schema(name, schemars::schema_for!(T));
+    ) -> Self 
+    where
+        T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
+    {
+        let name = ensure_schema::<T>(registry);
         self.spec.responses.push(ResponseSpec {
             status,
             content_type: "application/json",
             description: description.into(),
-            schema_name: Some(name.to_string()),
+            schema_name: Some(name),
         });
         self
     }
@@ -517,6 +561,23 @@ impl<H, S> OperationBuilder<H, Present, S> {
             content_type: "text/html",
             description: description.into(),
             schema_name: None,
+        });
+        self
+    }
+
+    /// Add an additional RFC 9457 `application/problem+json` response.
+    pub fn problem_response(
+        mut self,
+        registry: &dyn OpenApiRegistry,
+        status: u16,
+        description: impl Into<String>,
+    ) -> Self {
+        let problem_name = ensure_schema::<crate::http::problem::Problem>(registry);
+        self.spec.responses.push(ResponseSpec {
+            status,
+            content_type: problem::APPLICATION_PROBLEM_JSON,
+            description: description.into(),
+            schema_name: Some(problem_name),
         });
         self
     }
@@ -576,8 +637,10 @@ mod tests {
             self.operations.lock().unwrap().push(spec.clone());
         }
 
-        fn register_schema(&self, name: &str, _schema: schemars::schema::RootSchema) {
-            self.schemas.lock().unwrap().push(name.to_string());
+        fn ensure_schema_raw(&self, name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+            let name = name.to_string();
+            self.schemas.lock().unwrap().push(name.clone());
+            name
         }
 
         fn as_any(&self) -> &dyn std::any::Any {
@@ -615,7 +678,7 @@ mod tests {
         let registry = MockRegistry::new();
         let router = Router::new();
 
-        let router = OperationBuilder::<Missing, Missing, ()>::post("/test")
+        let _router = OperationBuilder::<Missing, Missing, ()>::post("/test")
             .summary("Test endpoint")
             .json_request::<serde_json::Value>(&registry, "optional body") // registers schema
             .handler(test_handler)

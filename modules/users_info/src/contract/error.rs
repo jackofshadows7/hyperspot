@@ -36,3 +36,21 @@ impl UsersInfoError {
         Self::Internal
     }
 }
+
+impl From<crate::domain::error::DomainError> for UsersInfoError {
+    fn from(domain_error: crate::domain::error::DomainError) -> Self {
+        use crate::domain::error::DomainError::*;
+        match domain_error {
+            UserNotFound { id } => Self::not_found(id),
+            EmailAlreadyExists { email } => Self::conflict(email),
+            InvalidEmail { email } => Self::validation(format!("Invalid email: {}", email)),
+            EmptyDisplayName => Self::validation("Display name cannot be empty".to_string()),
+            DisplayNameTooLong { len, max } => Self::validation(format!(
+                "Display name too long: {} characters (max: {})",
+                len, max
+            )),
+            Validation { field, message } => Self::validation(format!("{}: {}", field, message)),
+            Database { .. } => Self::internal(),
+        }
+    }
+}

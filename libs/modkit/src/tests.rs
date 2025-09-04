@@ -13,7 +13,9 @@ mod module_tests {
     // Minimal OpenAPI mock for REST phase
     struct MockOpenApi;
     impl OpenApiRegistry for MockOpenApi {
-        fn register_schema(&self, _name: &str, _schema: schemars::schema::RootSchema) {}
+        fn ensure_schema_raw(&self, name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+            name.to_string()
+        }
         fn register_operation(&self, _op: &crate::api::OperationSpec) {}
         fn as_any(&self) -> &dyn std::any::Any {
             self

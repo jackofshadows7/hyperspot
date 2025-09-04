@@ -8,7 +8,9 @@ async fn test_handler() -> &'static str { "ok" }
 struct DummyRegistry;
 impl modkit::api::OpenApiRegistry for DummyRegistry {
     fn register_operation(&self, _: &modkit::api::OperationSpec) {}
-    fn register_schema(&self, _: &str, _: schemars::schema::RootSchema) {}
+    fn ensure_schema_raw(&self, root_name: &str, _: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+        root_name.to_string()
+    }
     fn as_any(&self) -> &dyn std::any::Any { self }
 }
 

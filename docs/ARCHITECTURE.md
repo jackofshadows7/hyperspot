@@ -2,6 +2,13 @@
 
 This document describes the high-level architecture of HyperSpot Server, a modular platform for building AI services with automatic REST API generation and comprehensive OpenAPI documentation using the ModKit framework.
 
+## 🆕 Recent Architecture Improvements
+
+- **Centralized Error Handling**: RFC-9457 Problem Details standardized across all modules
+- **Enhanced Type Safety**: Improved `OperationBuilder` with compile-time guarantees for error responses
+- **Schema Management**: Automatic OpenAPI schema registration with conflict resolution
+- **Idiomatic Conversions**: Standardized `From` trait implementations for type conversions
+
 ## 🏛️ System Overview
 
 HyperSpot follows a **modular monolith** architecture where functionality is organized into self-contained modules that communicate through well-defined interfaces. The system provides automatic service discovery, dependency resolution, and lifecycle management through the ModKit runtime.
@@ -273,8 +280,7 @@ impl RestfulModule for MyModule {
     ) -> anyhow::Result<axum::Router> {
         use modkit::api::OperationBuilder;
         
-        // Register schema for OpenAPI
-        openapi.register_schema("User", schemars::schema_for!(User));
+        // Schemas are automatically registered via OperationBuilder methods
         
         // Type-safe endpoint registration
         let router = OperationBuilder::get("/users/{id}")
@@ -295,12 +301,30 @@ impl RestfulModule for MyModule {
 
 ### OpenAPI Generation
 
-The gateway automatically generates OpenAPI 3.0 specifications:
+The gateway automatically generates OpenAPI 3.0 specifications with enhanced features:
 
-- **Operations**: Generated from `OperationBuilder` registrations
-- **Schemas**: Auto-registered from Rust types using `schemars`
-- **Components**: Shared schema definitions managed by `ComponentsRegistry`
+- **Operations**: Generated from `OperationBuilder` registrations with RFC-9457 error responses
+- **Schemas**: Auto-registered from Rust types using `utoipa::ToSchema` with conflict resolution
+- **Problem Details**: Centralized RFC-9457 error schema for consistent error responses
+- **Components**: Shared schema definitions managed by `ComponentsRegistry` with atomic updates
 - **Documentation**: Available at `/docs` (Stoplight Elements) and `/openapi.json`
+
+#### RFC-9457 Error Integration
+
+All modules now use standardized error responses:
+
+```rust
+OperationBuilder::post("/users")
+    .json_request::<CreateUserRequest>(openapi, "User data")
+    .json_response_with_schema::<User>(openapi, 201, "User created")
+    .problem_response(openapi, 400, "Invalid input")
+    .problem_response(openapi, 409, "Email already exists")
+    .problem_response(openapi, 500, "Internal server error")
+    .handler(create_user)
+    .register(router, openapi)
+```
+
+This generates proper OpenAPI responses with `application/problem+json` content type and references to the shared `Problem` schema.
 
 ## 🔒 Type Safety & Error Handling
 
@@ -317,9 +341,12 @@ let router = OperationBuilder::get("/users")
     .register(router, openapi); // Won't compile without handler and response
 ```
 
-### Error Propagation
+### Error Propagation & RFC-9457 Handling
 
-All operations use `anyhow::Result` for consistent error handling:
+The system uses multiple error handling strategies:
+
+#### Module Lifecycle Errors
+Module operations use `anyhow::Result` for consistent error handling:
 
 ```rust
 #[async_trait]
@@ -329,6 +356,45 @@ impl Module for MyModule {
             .context("Failed to load module configuration")?;
         // ...
         Ok(())
+    }
+}
+```
+
+#### HTTP Error Responses
+REST handlers use `ProblemResponse` for standardized HTTP error responses:
+
+```rust
+use modkit::{ProblemResponse, bad_request, not_found, conflict, internal_error};
+
+async fn get_user_handler(
+    Path(id): Path<String>
+) -> Result<Json<User>, ProblemResponse> {
+    match user_service.find_by_id(&id).await {
+        Ok(Some(user)) => Ok(Json(user.into())),
+        Ok(None) => Err(not_found(format!("User '{}' not found", id))),
+        Err(DomainError::InvalidFormat { .. }) => {
+            Err(bad_request("Invalid user ID format"))
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch user: {}", e);
+            Err(internal_error("User retrieval failed"))
+        }
+    }
+}
+```
+
+#### Domain Error Mapping
+Domain errors are mapped to appropriate HTTP problems:
+
+```rust
+impl From<DomainError> for ProblemResponse {
+    fn from(error: DomainError) -> Self {
+        match error {
+            DomainError::NotFound { .. } => not_found(error.to_string()),
+            DomainError::AlreadyExists { .. } => conflict(error.to_string()),
+            DomainError::InvalidInput { .. } => bad_request(error.to_string()),
+            _ => internal_error("Operation failed")
+        }
     }
 }
 ```

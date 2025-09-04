@@ -11,11 +11,12 @@ use axum::{
     Router,
 };
 use modkit::{contracts::OpenApiRegistry, Module, RestfulModule};
-use schemars::JsonSchema;
+use utoipa::ToSchema;
 use serde::{Deserialize, Serialize};
 
 /// Test user structure
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
+#[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
+#[schema(title = "User")]
 pub struct User {
     pub id: u32,
     pub name: String,
@@ -23,7 +24,8 @@ pub struct User {
 }
 
 /// Test request for creating users
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Debug)]
+#[schema(title = "CreateUserRequest")]
 pub struct CreateUserRequest {
     pub name: String,
     pub email: String,
@@ -52,12 +54,7 @@ impl RestfulModule for TestUsersModule {
     ) -> Result<axum::Router> {
         use modkit::api::OperationBuilder;
 
-        // Register schemas
-        openapi.register_schema("User", schemars::schema_for!(User));
-        openapi.register_schema(
-            "CreateUserRequest",
-            schemars::schema_for!(CreateUserRequest),
-        );
+        // Schemas will be auto-registered when used in operations
 
         // GET /users - List users
         let router = OperationBuilder::get("/users")
@@ -67,7 +64,7 @@ impl RestfulModule for TestUsersModule {
             .tag("Users")
             .query_param("limit", false, "Maximum number of users to return")
             .query_param("offset", false, "Number of users to skip")
-            .json_response(200, "Users retrieved successfully")
+            .json_response_with_schema::<Vec<User>>(openapi, 200, "Users retrieved successfully")
             .json_response(500, "Internal server error")
             .handler(get(list_users_handler))
             .register(router, openapi);
@@ -79,7 +76,7 @@ impl RestfulModule for TestUsersModule {
             .description("Retrieve a specific user by their ID")
             .tag("Users")
             .path_param("id", "User ID")
-            .json_response(200, "User found")
+            .json_response_with_schema::<User>(openapi, 200, "User found")
             .json_response(404, "User not found")
             .json_response(500, "Internal server error")
             .handler(get(get_user_handler))
@@ -91,7 +88,8 @@ impl RestfulModule for TestUsersModule {
             .summary("Create new user")
             .description("Create a new user with the provided data")
             .tag("Users")
-            .json_response(201, "User created successfully")
+            .json_request::<CreateUserRequest>(openapi, "User creation data")
+            .json_response_with_schema::<User>(openapi, 201, "User created successfully")
             .json_response(400, "Invalid input data")
             .json_response(500, "Internal server error")
             .handler(axum::routing::post(create_user_handler))
@@ -142,7 +140,7 @@ async fn test_operation_builder_integration() {
     let test_module = TestUsersModule;
     let ctx =
         modkit::context::ModuleCtxBuilder::new(tokio_util::sync::CancellationToken::new()).build();
-    let final_router = test_module
+    let _final_router = test_module
         .register_rest(&ctx, router, &mut registry)
         .expect("Failed to register routes");
 
