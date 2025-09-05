@@ -28,6 +28,28 @@ pub mod state {
     pub struct Present;
 }
 
+
+/// Internal trait mapping handler state to the concrete router slot type.
+/// For `Missing` there is no router slot; for `Present` it is `MethodRouter<S>`.
+/// Private sealed trait to enforce the implementation is only visible within this module.
+mod sealed {
+    pub trait Sealed {}
+}
+
+pub trait HandlerSlot<S>: sealed::Sealed {
+    type Slot;
+}
+
+impl sealed::Sealed for Missing {}
+impl sealed::Sealed for Present {}
+
+impl<S> HandlerSlot<S> for Missing {
+    type Slot = ();
+}
+impl<S> HandlerSlot<S> for Present {
+    type Slot = MethodRouter<S>;
+}
+
 pub use state::{Missing, Present};
 
 /// Parameter specification for API operations
@@ -94,25 +116,30 @@ pub trait OpenApiRegistry {
     /// Ensure schema for `T` (including transitive dependencies) is registered
     /// under components and return the canonical component name for `$ref`.
     /// This is a type-erased version for dyn compatibility.
-    fn ensure_schema_raw(&self, name: &str, schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String;
+    fn ensure_schema_raw(
+        &self,
+        name: &str,
+        schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>,
+    ) -> String;
 
     /// Downcast support for accessing the concrete implementation if needed.
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Helper function to call ensure_schema with proper type information
-pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(registry: &dyn OpenApiRegistry) -> String {
-    use utoipa::PartialSchema;
+pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(
+    registry: &dyn OpenApiRegistry,
+) -> String {
     use utoipa::openapi::RefOr;
+    use utoipa::PartialSchema;
 
     // 1) Canonical component name for T as seen by utoipa
     let root_name = T::name().to_string();
 
     // 2) Always insert T's own schema first (actual object, not a ref)
     //    This avoids self-referential components.
-    let mut collected: Vec<(String, RefOr<utoipa::openapi::schema::Schema>)> = vec![
-        (root_name.clone(), <T as PartialSchema>::schema()),
-    ];
+    let mut collected: Vec<(String, RefOr<utoipa::openapi::schema::Schema>)> =
+        vec![(root_name.clone(), <T as PartialSchema>::schema())];
 
     // 3) Collect and append all referenced schemas (dependencies) of T
     T::schemas(&mut collected);
@@ -121,15 +148,19 @@ pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(regi
     registry.ensure_schema_raw(&root_name, collected)
 }
 
+
 /// Type-safe operation builder with compile-time guarantees.
 ///
 /// Generic parameters:
 /// - `H`: Handler state (Missing | Present)
 /// - `R`: Response state (Missing | Present)
 /// - `S`: Router state type (what you put into `Router::with_state(S)`).
-pub struct OperationBuilder<H, R, S> {
+pub struct OperationBuilder<H, R, S>
+where
+    H: HandlerSlot<S>,
+{
     spec: OperationSpec,
-    method_router: Option<MethodRouter<S>>,
+    method_router: <H as HandlerSlot<S>>::Slot,
     _has_handler: PhantomData<H>,
     _has_response: PhantomData<R>,
     #[allow(clippy::type_complexity)]
@@ -162,7 +193,7 @@ impl<S> OperationBuilder<Missing, Missing, S> {
                 responses: Vec::new(),
                 handler_id,
             },
-            method_router: None,
+            method_router: (), // no router in Missing state
             _has_handler: PhantomData,
             _has_response: PhantomData,
             _state: PhantomData,
@@ -198,7 +229,10 @@ impl<S> OperationBuilder<Missing, Missing, S> {
 // -------------------------------------------------------------------------------------------------
 // Descriptive methods — available at any stage
 // -------------------------------------------------------------------------------------------------
-impl<H, R, S> OperationBuilder<H, R, S> {
+impl<H, R, S> OperationBuilder<H, R, S>
+where
+    H: HandlerSlot<S>,
+{
     /// Inspect the spec (primarily for tests)
     pub fn spec(&self) -> &OperationSpec {
         &self.spec
@@ -358,7 +392,7 @@ where
 
         OperationBuilder {
             spec: self.spec,
-            method_router: Some(method_router),
+            method_router, // concrete MethodRouter<S> in Present state
             _has_handler: PhantomData::<Present>,
             _has_response: self._has_response,
             _state: self._state,
@@ -370,7 +404,7 @@ where
     pub fn method_router(self, mr: MethodRouter<S>) -> OperationBuilder<Present, R, S> {
         OperationBuilder {
             spec: self.spec,
-            method_router: Some(mr),
+            method_router: mr, // concrete MethodRouter<S> in Present state
             _has_handler: PhantomData::<Present>,
             _has_response: self._has_response,
             _state: self._state,
@@ -381,7 +415,10 @@ where
 // -------------------------------------------------------------------------------------------------
 // Response setting — transitions Missing -> Present for response (first response)
 // -------------------------------------------------------------------------------------------------
-impl<H, S> OperationBuilder<H, Missing, S> {
+impl<H, S> OperationBuilder<H, Missing, S>
+where
+    H: HandlerSlot<S>,
+{
     /// Add a raw response spec (transitions from Missing to Present).
     pub fn response(mut self, resp: ResponseSpec) -> OperationBuilder<H, Present, S> {
         self.spec.responses.push(resp);
@@ -421,7 +458,7 @@ impl<H, S> OperationBuilder<H, Missing, S> {
         registry: &dyn OpenApiRegistry,
         status: u16,
         description: impl Into<String>,
-    ) -> OperationBuilder<H, Present, S> 
+    ) -> OperationBuilder<H, Present, S>
     where
         T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
     {
@@ -511,7 +548,10 @@ impl<H, S> OperationBuilder<H, Missing, S> {
 // -------------------------------------------------------------------------------------------------
 // Additional responses — for Present response state (additional responses)
 // -------------------------------------------------------------------------------------------------
-impl<H, S> OperationBuilder<H, Present, S> {
+impl<H, S> OperationBuilder<H, Present, S>
+where
+    H: HandlerSlot<S>,
+{
     /// Add a JSON response (additional).
     pub fn json_response(mut self, status: u16, description: impl Into<String>) -> Self {
         self.spec.responses.push(ResponseSpec {
@@ -529,7 +569,7 @@ impl<H, S> OperationBuilder<H, Present, S> {
         registry: &dyn OpenApiRegistry,
         status: u16,
         description: impl Into<String>,
-    ) -> Self 
+    ) -> Self
     where
         T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
     {
@@ -599,13 +639,8 @@ where
         // into an OpenAPI Operation + RequestBody + Responses with component refs).
         openapi.register_operation(&self.spec);
 
-        // Add the route to the router — at this point method_router must be Some
-        // due to the `Present` handler state.
-        let method_router = self
-            .method_router
-            .expect("Present state guarantees method_router exists");
-
-        router.route(&self.spec.path, method_router)
+        // In Present state the method_router is guaranteed to be a real MethodRouter<S>.
+        router.route(&self.spec.path, self.method_router)
     }
 }
 
@@ -634,12 +669,20 @@ mod tests {
 
     impl OpenApiRegistry for MockRegistry {
         fn register_operation(&self, spec: &OperationSpec) {
-            self.operations.lock().unwrap().push(spec.clone());
+            if let Ok(mut ops) = self.operations.lock() {
+                ops.push(spec.clone());
+            }
         }
 
-        fn ensure_schema_raw(&self, name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+        fn ensure_schema_raw(
+            &self,
+            name: &str,
+            _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>,
+        ) -> String {
             let name = name.to_string();
-            self.schemas.lock().unwrap().push(name.clone());
+            if let Ok(mut s) = self.schemas.lock() {
+                s.push(name.clone());
+            }
             name
         }
 

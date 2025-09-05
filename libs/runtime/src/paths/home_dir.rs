@@ -204,10 +204,18 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn unix_error_when_home_missing() {
-        // Remove HOME from env
+        // Save and restore original HOME to isolate this test
+        let original_home = env::var("HOME").ok();
         env::remove_var("HOME");
 
-        let err = resolve_home_dir(None, ".hyperspot", false).unwrap_err();
+        let result = resolve_home_dir(None, ".hyperspot", false);
+        
+        // Restore original HOME before asserting to avoid affecting other tests
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        }
+        
+        let err = result.unwrap_err();
         match err {
             HomeDirError::HomeMissing => {}
             _ => panic!("Expected HomeMissing, got {:?}", err),

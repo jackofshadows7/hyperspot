@@ -218,7 +218,7 @@ fn create_test_registry(modules: Vec<TestModule>) -> anyhow::Result<ModuleRegist
         );
     }
 
-    builder.build_topo_sorted()
+    Ok(builder.build_topo_sorted()?)
 }
 
 // Mock DB factory for testing

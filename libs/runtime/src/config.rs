@@ -259,7 +259,7 @@ fn merge_module_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{env, fs};
     use tempfile::tempdir;
 
     /// Helper: a normalized home_dir should be absolute and not start with '~'.
@@ -354,6 +354,12 @@ logging:
     #[test]
     fn test_load_or_default_normalizes_home_dir_when_none() {
         // No external file => defaults, but home_dir must be normalized.
+        // Ensure platform env is present for home resolution in CI.
+        let tmp = tempdir().unwrap();
+        #[cfg(target_os = "windows")]
+        env::set_var("APPDATA", tmp.path());
+        #[cfg(not(target_os = "windows"))]
+        env::set_var("HOME", tmp.path());
         let config = AppConfig::load_or_default(None::<&str>).unwrap();
         assert!(is_normalized_path(&config.server.home_dir));
         assert!(config.server.home_dir.ends_with(default_subdir()));

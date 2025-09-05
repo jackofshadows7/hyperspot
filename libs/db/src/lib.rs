@@ -355,7 +355,8 @@ impl DbHandle {
     pub async fn lock(&self, module: &str, key: &str) -> Result<DbLockGuard> {
         let lock_manager =
             advisory_locks::LockManager::new(self.engine, self.pool.clone(), self.dsn.clone());
-        lock_manager.lock(module, key).await
+        let guard = lock_manager.lock(module, key).await?;
+        Ok(guard)
     }
 
     /// Try to acquire an advisory lock with configurable retry/backoff policy.
@@ -367,7 +368,8 @@ impl DbHandle {
     ) -> Result<Option<DbLockGuard>> {
         let lock_manager =
             advisory_locks::LockManager::new(self.engine, self.pool.clone(), self.dsn.clone());
-        lock_manager.try_lock(module, key, config).await
+        let res = lock_manager.try_lock(module, key, config).await?;
+        Ok(res)
     }
 
     // --- Generic transaction begin (returns proper enum with lifetime) ---

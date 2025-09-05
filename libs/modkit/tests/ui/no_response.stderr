@@ -6,7 +6,7 @@ error[E0599]: no method named `register` found for struct `modkit::OperationBuil
 23 | |         .summary("Test endpoint")
 24 | |         .handler(test_handler)
 25 | |         .register(router, &registry);
-   | |         -^^^^^^^^ method not found in `modkit::OperationBuilder<Present, Missing, ()>`
+   | |         -^^^^^^^^ method not found in `OperationBuilder<Present, Missing, ()>`
    | |_________|
    |
    |

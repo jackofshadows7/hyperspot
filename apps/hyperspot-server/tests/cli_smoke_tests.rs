@@ -399,23 +399,28 @@ logging:
     );
 }
 
-#[test]
-fn test_cli_no_arguments() {
-    let output = run_hyperspot_server(&[]);
-
-    // When no subcommand is provided, the app defaults to 'run' and may fail with database errors
-    // or show usage/help. Both behaviors are acceptable.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        stdout.contains("Usage:")
-            || stdout.contains("USAGE:")
-            || stderr.contains("required")
-            || stderr.contains("subcommand")
-            || stderr.contains("Error")
-            || stdout.contains("help")
-            || stdout.contains("HyperSpot Server starting"), // App may default to run
-        "Should show usage, help, or run with potential error"
-    );
+#[tokio::test]
+async fn test_cli_no_arguments() {
+    // When no subcommand is provided, the app may default to 'run' and keep running.
+    // Use a short timeout and accept timeout as success (server started).
+    match run_hyperspot_server_with_timeout(&[], Duration::from_secs(2)).await {
+        Err(e) if e.to_string().contains("elapsed") => {
+            // Timed out: treated as success because server is running.
+        }
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stdout.contains("Usage:")
+                    || stdout.contains("USAGE:")
+                    || stderr.contains("required")
+                    || stderr.contains("subcommand")
+                    || stderr.contains("Error")
+                    || stdout.contains("help")
+                    || stdout.contains("HyperSpot Server starting"),
+                "Should show usage, help, or run with potential error"
+            );
+        }
+        Err(other) => panic!("Unexpected failure: {other}"),
+    }
 }

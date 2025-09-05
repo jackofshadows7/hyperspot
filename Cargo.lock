@@ -725,7 +725,9 @@ dependencies = [
  "sea-orm",
  "sqlx",
  "tempfile",
+ "thiserror 2.0.16",
  "tokio",
+ "tracing",
  "uuid",
  "xxhash-rust",
 ]

@@ -120,7 +120,8 @@ pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
     cancel.cancelled().await;
 
     tracing::info!("Phase: stop");
-    registry.run_stop_phase(cancel).await
+    registry.run_stop_phase(cancel).await?;
+    Ok(())
 }
 
 #[cfg(feature = "hs-runtime")]

@@ -7,7 +7,7 @@ mod module_tests {
     use crate::{
         context::ModuleCtxBuilder,
         contracts::{Module, OpenApiRegistry, RestHostModule, RestfulModule},
-        registry::{ModuleRegistry, RegistryBuilder},
+        registry::{ModuleRegistry, RegistryBuilder, RegistryError},
     };
 
     // Minimal OpenAPI mock for REST phase
@@ -170,14 +170,9 @@ mod module_tests {
         let ctx = ModuleCtxBuilder::new(cancel).build();
 
         let router = Router::new();
-        // Should fail with specific error message
+        // Should fail with specific error type
         let result = registry.run_rest_phase(&ctx, router);
-        assert!(result.is_err());
-
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("REST phase requires an ingress host"));
-        assert!(error_msg.contains("found modules with `capability \"rest\"`"));
-        assert!(error_msg.contains("but no module with `capability \"rest_host\"`"));
+        assert!(matches!(result, Err(RegistryError::RestRequiresHost)));
     }
 
     #[test]
@@ -214,7 +209,6 @@ mod module_tests {
     }
 
     #[test]
-    #[should_panic(expected = "Multiple REST host modules detected")]
     fn test_multiple_rest_hosts_fails_at_registration() {
         let mut builder = RegistryBuilder::default();
         let call_tracker1 = Arc::new(Mutex::new(Vec::new()));
@@ -229,8 +223,18 @@ mod module_tests {
         let host2 = Arc::new(TestRestHost::new("host2", call_tracker2));
         builder.register_core_with_meta("host2", &[], host2.clone() as Arc<dyn Module>);
 
-        // This should panic with a clear message
+        // Registering a second host should be reported as a configuration error at build time
         builder.register_rest_host_with_meta("host2", host2.clone() as Arc<dyn RestHostModule>);
+        let err = builder.build_topo_sorted().unwrap_err();
+        match err {
+            RegistryError::InvalidRegistryConfiguration { errors } => {
+                assert!(
+                    errors.iter().any(|e| e.contains("Multiple REST host modules detected")),
+                    "expected multiple host configuration error, got {errors:?}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -250,11 +254,10 @@ mod module_tests {
         let result = builder.build_topo_sorted();
         match result {
             Ok(_) => panic!("Expected build to fail, but it succeeded"),
-            Err(e) => {
-                let error_msg = e.to_string();
-                assert!(error_msg
-                    .contains("REST host capability registered for unknown module 'test_host'"));
-            }
+            Err(e) => match e {
+                RegistryError::UnknownModule(name) => assert_eq!(name, "test_host"),
+                other => panic!("unexpected error: {other:?}"),
+            },
         }
     }
 

@@ -797,7 +797,17 @@ pub fn lifecycle(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Generated additions (outside of impl-block)
-    let ty_ident = ty.segments.last().unwrap().ident.clone();
+    let ty_ident = match ty.segments.last() {
+        Some(seg) => seg.ident.clone(),
+        None => {
+            return syn::Error::new_spanned(
+                &ty,
+                "unsupported impl target: expected a concrete type path",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
     let ty_snake = ty_ident.to_string().to_snake_case();
 
     let ready_shim_ident = format_ident!("__modkit_run_ready_shim{ty_snake}");

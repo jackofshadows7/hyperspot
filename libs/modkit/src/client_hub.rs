@@ -27,7 +27,7 @@ pub const GLOBAL_SCOPE: &str = "global";
 
 /// Stable type key for trait objects — uses fully-qualified `type_name::<T>()`.
 #[derive(Clone, Eq, PartialEq, Hash)]
-struct TypeKey(&'static str);
+pub struct TypeKey(&'static str);
 
 impl TypeKey {
     #[inline]
@@ -44,9 +44,10 @@ impl fmt::Debug for TypeKey {
 
 /// Optional scope (e.g., `global`, `tenant-42`, `user-17`).
 #[derive(Clone, Eq, PartialEq, Hash)]
-struct ScopeKey(Option<Arc<str>>);
+pub struct ScopeKey(Option<Arc<str>>);
 
 impl ScopeKey {
+    #[allow(dead_code)]
     #[inline] fn global() -> Self { ScopeKey(None) }
     #[inline] fn named(s: impl Into<Arc<str>>) -> Self { ScopeKey(Some(s.into())) }
 }
