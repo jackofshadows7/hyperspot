@@ -1,0 +1,22 @@
+[package]
+name = "modkit-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "parsing", "printing", "derive"] }
+heck = "0.5"
+
+[dev-dependencies]
+trybuild = "1"
+tokio-util = "0.7"
+anyhow = "1.0"
+async-trait = "0.1"
+inventory = "0.3"
+tokio = "1.0"
+modkit = { path = "..", default-features = false }

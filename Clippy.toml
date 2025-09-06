@@ -1,0 +1,14 @@
+# Clippy configuration for style enforcement
+# Keep thresholds reasonable for a modular workspace
+too-many-arguments-threshold = 8
+type-complexity-threshold = 120
+cognitive-complexity-threshold = 30
+
+# Treat warnings as errors in CI; allow opting out per lint below
+warn-on-all-wildcard-imports = true
+
+# You can allow specific lints here if they get too noisy across the workspace
+# For example:
+# allow = [
+#   "module_name_repetitions",
+# ]

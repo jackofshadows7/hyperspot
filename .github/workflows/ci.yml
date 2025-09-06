@@ -1,0 +1,194 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel previous runs for the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Enable sccache globally (picked up by rustc).
+  RUSTC_WRAPPER: sccache
+  # Enable sccache's GitHub Actions storage backend.
+  SCCACHE_GHA_ENABLED: "true"
+  # Optional size cap for the sccache store.
+  SCCACHE_CACHE_SIZE: "2G"
+  # Usually better determinism and smaller cache churn in CI.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    name: Test Suite (${{ matrix.os }}, rust=${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # do not abort other OSes on a single failure
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+
+      # Caches Cargo registry/git + target/ in a robust way across platforms.
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Separate caches by OS to avoid incompatible artifacts.
+          shared-key: ${{ matrix.os }}
+          # You can optionally include extra target dirs if you build multiple crates.
+
+      # Install and configure sccache (cross-platform)
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Show rustc version
+        run: rustc -Vv
+
+      # Formatting check (fast fail for style issues)
+      - name: cargo fmt (check)
+        run: cargo fmt --all -- --check
+
+      # Clippy lints across workspace and all targets; fail on warnings
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # Unit/integration tests; include all features if your project supports it
+      - name: cargo test
+        run: cargo test --workspace --all-features --no-fail-fast
+
+      # Always print sccache stats to see hit/miss ratio
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  security:
+    name: Security (cargo-deny & cargo-audit on Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@v2
+
+      # Use prebuilt binaries for speed (no cargo install build time).
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Runs your deny.toml policy (licenses, bans, duplicates, advisories, etc.).
+      # Does NOT fail the job/CI for now as requested.
+      - name: cargo deny check
+        run: cargo deny check
+        continue-on-error: true
+
+      # RustSec DB audit for known vulnerabilities (configurable via audit.toml).
+      # Does NOT fail the job/CI for now as requested.
+      - name: cargo audit
+        run: cargo audit
+        continue-on-error: true
+
+  smoke-test:
+    name: Smoke Test (Linux only)
+    runs-on: ubuntu-latest
+    needs: [test]   # Run smoke tests only if the cross-platform test job finished
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      # Build release to mirror production binaries if applicable.
+      - name: Build (release)
+        run: cargo build --release --workspace
+
+      - name: Create data dir
+        run: mkdir -p data
+
+      # Adjust the binary name/args to your project.
+      - name: Start server (background)
+        run: |
+          cargo run --bin hyperspot-server -- --config config/quickstart.yaml run &
+          echo $! > server.pid
+          sleep 10
+
+      - name: Smoke tests
+        run: bash ./scripts/smoke-test.sh
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" || true
+          fi
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  coverage:
+    name: Code Coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (with llvm-tools)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # Generate lcov.info for upload. Customize flags/features as needed.
+      - name: Coverage (lcov)
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      # Upload to Codecov; do not fail CI if Codecov is down/misconfigured.
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          # token: ${{ secrets.CODECOV_TOKEN }}  # Uncomment if required for private repos

@@ -1,0 +1,42 @@
+# HyperSpot Server Configuration
+
+# Core server configuration (global section)  
+server:
+  home_dir: "~/.hyperspot"
+
+# Database configuration (global section)
+database:
+  url: "sqlite://database/database.db?mode=rwc"
+  max_conns: 10
+  busy_timeout_ms: 5000
+
+# Logging configuration (global section)
+logging:
+  # global section
+  default:
+    console_level: info
+    file: "logs/hyperspot.log"
+    file_level: info
+    max_age_days: 28
+    max_backups: 3
+    max_size_mb: 1000
+  # api_ingress section
+  api_ingress:
+    console_level: info
+    file: "logs/api.log"
+    file_level: info
+    max_age_days: 28
+    max_backups: 3
+    max_size_mb: 10000
+
+
+# Per-module configurations moved under modules section
+modules:
+  api_ingress:
+    bind_addr: "127.0.0.1:8088"
+    enable_docs: true
+    cors_enabled: false
+  users_info:
+    default_page_size: 5
+    max_page_size: 100
+

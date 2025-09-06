@@ -1,0 +1,5 @@
+error: client must be a trait path, e.g. client = crate::api::MyClient
+ --> tests/ui/fail/client_not_trait_path.rs:3:44
+  |
+3 | #[module(name="x", caps=[stateful], client=123)]
+  |                                            ^^^
