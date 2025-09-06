@@ -29,7 +29,7 @@ impl ExampleServer {
 #[async_trait]
 impl Runnable for ExampleServer {
     async fn run(self: std::sync::Arc<Self>, cancel: CancellationToken) -> Result<()> {
-        println!("🚀 Starting ExampleServer on port {}", self.port);
+        println!("Starting ExampleServer on port {}", self.port);
 
         // Simulate a server loop that processes requests
         let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -40,24 +40,24 @@ impl Runnable for ExampleServer {
                     // Simulate processing a request
                     let count = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if count % 10 == 0 {
-                        println!("📊 Processed {} requests", count);
+                        println!("Processed {} requests", count);
                     }
                 }
                 _ = cancel.cancelled() => {
-                    println!("🛑 Shutdown signal received, stopping server");
+                    println!("Shutdown signal received, stopping server");
                     break;
                 }
             }
         }
 
-        println!("✅ Server stopped gracefully");
+        println!("Server stopped gracefully");
         Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("🔧 Lifecycle Framework Example");
+    println!("Lifecycle Framework Example");
     println!("==============================\n");
 
     // Create our server
@@ -66,29 +66,29 @@ async fn main() -> Result<()> {
     // Wrap it with WithLifecycle to get StatefulModule implementation
     let module = WithLifecycle::new(server).with_stop_timeout(Duration::from_secs(5)); // 5 second timeout
 
-    println!("📋 Module status: {:?}", module.status());
+    println!("Module status: {:?}", module.status());
 
     // Create a cancellation token for external control
     let cancel_token = CancellationToken::new();
 
     // Start the module
-    println!("▶️  Starting module...");
+    println!("Starting module...");
     module.start(cancel_token.clone()).await?;
 
     // Give it some time to run
-    println!("⏳ Letting server run for 2 seconds...");
+    println!("Letting server run for 2 seconds...");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Check the counter
-    println!("📊 Requests processed: {}", module.inner().get_counter());
+    println!("Requests processed: {}", module.inner().get_counter());
 
     // Stop the module
-    println!("⏹️  Stopping module...");
+    println!("Stopping module...");
     module.stop(cancel_token.clone()).await?;
 
-    println!("📋 Final module status: {:?}", module.status());
-    println!("🎯 Final request count: {}", module.inner().get_counter());
+    println!("Final module status: {:?}", module.status());
+    println!("Final request count: {}", module.inner().get_counter());
 
-    println!("\n✅ Example completed successfully!");
+    println!("\nExample completed successfully!");
     Ok(())
 }

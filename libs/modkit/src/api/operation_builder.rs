@@ -15,7 +15,13 @@ use axum::{handler::Handler, routing::MethodRouter, Router};
 use http::Method;
 use std::marker::PhantomData;
 
-use crate::http::problem;
+use crate::api::problem;
+
+/// Type alias for schema collections used in API operations.
+type SchemaCollection = Vec<(
+    String,
+    utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+)>;
 
 /// Type-state markers for compile-time enforcement
 pub mod state {
@@ -27,7 +33,6 @@ pub mod state {
     #[derive(Debug, Clone, Copy)]
     pub struct Present;
 }
-
 
 /// Internal trait mapping handler state to the concrete router slot type.
 /// For `Missing` there is no router slot; for `Present` it is `MethodRouter<S>`.
@@ -116,11 +121,7 @@ pub trait OpenApiRegistry {
     /// Ensure schema for `T` (including transitive dependencies) is registered
     /// under components and return the canonical component name for `$ref`.
     /// This is a type-erased version for dyn compatibility.
-    fn ensure_schema_raw(
-        &self,
-        name: &str,
-        schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>,
-    ) -> String;
+    fn ensure_schema_raw(&self, name: &str, schemas: SchemaCollection) -> String;
 
     /// Downcast support for accessing the concrete implementation if needed.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -130,7 +131,6 @@ pub trait OpenApiRegistry {
 pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(
     registry: &dyn OpenApiRegistry,
 ) -> String {
-    use utoipa::openapi::RefOr;
     use utoipa::PartialSchema;
 
     // 1) Canonical component name for T as seen by utoipa
@@ -138,8 +138,7 @@ pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(
 
     // 2) Always insert T's own schema first (actual object, not a ref)
     //    This avoids self-referential components.
-    let mut collected: Vec<(String, RefOr<utoipa::openapi::schema::Schema>)> =
-        vec![(root_name.clone(), <T as PartialSchema>::schema())];
+    let mut collected: SchemaCollection = vec![(root_name.clone(), <T as PartialSchema>::schema())];
 
     // 3) Collect and append all referenced schemas (dependencies) of T
     T::schemas(&mut collected);
@@ -147,7 +146,6 @@ pub fn ensure_schema<T: utoipa::ToSchema + utoipa::PartialSchema + 'static>(
     // 4) Pass to registry for insertion
     registry.ensure_schema_raw(&root_name, collected)
 }
-
 
 /// Type-safe operation builder with compile-time guarantees.
 ///
@@ -327,7 +325,11 @@ where
 
     /// Attach a JSON request body and auto-register its schema using `utoipa`.
     /// This variant sets a description (`Some(desc)`) and marks the body as **required**.
-    pub fn json_request<T>(mut self, registry: &dyn OpenApiRegistry, desc: impl Into<String>) -> Self
+    pub fn json_request<T>(
+        mut self,
+        registry: &dyn OpenApiRegistry,
+        desc: impl Into<String>,
+    ) -> Self
     where
         T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
     {
@@ -528,7 +530,7 @@ where
         description: impl Into<String>,
     ) -> OperationBuilder<H, Present, S> {
         // Ensure `Problem` schema is registered in components
-        let problem_name = ensure_schema::<crate::http::problem::Problem>(registry);
+        let problem_name = ensure_schema::<crate::api::problem::Problem>(registry);
         self.spec.responses.push(ResponseSpec {
             status,
             content_type: problem::APPLICATION_PROBLEM_JSON,
@@ -612,7 +614,7 @@ where
         status: u16,
         description: impl Into<String>,
     ) -> Self {
-        let problem_name = ensure_schema::<crate::http::problem::Problem>(registry);
+        let problem_name = ensure_schema::<crate::api::problem::Problem>(registry);
         self.spec.responses.push(ResponseSpec {
             status,
             content_type: problem::APPLICATION_PROBLEM_JSON,
@@ -677,7 +679,10 @@ mod tests {
         fn ensure_schema_raw(
             &self,
             name: &str,
-            _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>,
+            _schemas: Vec<(
+                String,
+                utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+            )>,
         ) -> String {
             let name = name.to_string();
             if let Ok(mut s) = self.schemas.lock() {

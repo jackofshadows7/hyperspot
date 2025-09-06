@@ -44,7 +44,7 @@ async fn stays_starting_until_ready_signal() {
     assert_eq!(m.status(), Status::Running);
 
     parent.cancel();
-    let _ = m.stop(CancellationToken::new()).await.unwrap();
+    m.stop(CancellationToken::new()).await.unwrap();
     assert_eq!(m.status(), Status::Stopped);
 }
 
@@ -58,7 +58,7 @@ async fn auto_notify_when_no_ready_param() {
     assert!(matches!(m.status(), Status::Running | Status::Starting));
 
     parent.cancel();
-    let _ = m.stop(CancellationToken::new()).await.unwrap();
+    m.stop(CancellationToken::new()).await.unwrap();
     assert_eq!(m.status(), Status::Stopped);
 }
 

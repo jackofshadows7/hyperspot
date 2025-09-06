@@ -11,8 +11,8 @@ use axum::{
     Router,
 };
 use modkit::{contracts::OpenApiRegistry, Module, RestfulModule};
-use utoipa::ToSchema;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Test user structure
 #[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
@@ -134,38 +134,33 @@ async fn create_user_handler(Json(req): Json<CreateUserRequest>) -> Json<User> {
 #[tokio::test]
 async fn test_operation_builder_integration() {
     // Test that our new OperationBuilder works with the registry
-    let mut registry = api_ingress::ApiIngress::default();
+    let registry = api_ingress::ApiIngress::default();
     let router = Router::new();
 
     let test_module = TestUsersModule;
     let ctx =
         modkit::context::ModuleCtxBuilder::new(tokio_util::sync::CancellationToken::new()).build();
     let _final_router = test_module
-        .register_rest(&ctx, router, &mut registry)
+        .register_rest(&ctx, router, &registry)
         .expect("Failed to register routes");
 
     // Basic test that the router was created without errors
     // In a full integration test, we would start the server and make HTTP requests
-    assert!(
-        true,
-        "Router created successfully without compilation errors"
-    );
 }
 
 #[tokio::test]
 async fn test_schema_registration() {
     // Test that schemas are properly registered
-    let mut registry = api_ingress::ApiIngress::default();
+    let registry = api_ingress::ApiIngress::default();
     let router = Router::new();
 
     let test_module = TestUsersModule;
     let ctx =
         modkit::context::ModuleCtxBuilder::new(tokio_util::sync::CancellationToken::new()).build();
     let _final_router = test_module
-        .register_rest(&ctx, router, &mut registry)
+        .register_rest(&ctx, router, &registry)
         .expect("Failed to register routes");
 
     // This test would verify that schemas were registered, but since the
     // schema registry is internal, we just verify no compilation errors
-    assert!(true, "Schema registration completed without errors");
 }

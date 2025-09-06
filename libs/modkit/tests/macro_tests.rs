@@ -16,7 +16,14 @@ use modkit::{
 struct TestOpenApiRegistry;
 impl OpenApiRegistry for TestOpenApiRegistry {
     fn register_operation(&self, _spec: &modkit::api::OperationSpec) {}
-    fn ensure_schema_raw(&self, root_name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+    fn ensure_schema_raw(
+        &self,
+        root_name: &str,
+        _schemas: Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) -> String {
         root_name.to_string()
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -223,7 +230,7 @@ impl StatefulModule for StatefulOnlyModule {
 async fn test_basic_macro_and_init() {
     assert_eq!(BasicModule::MODULE_NAME, "basic");
     let ctx = ModuleCtxBuilder::new(CancellationToken::new()).build();
-    BasicModule::default().init(&ctx).await.unwrap();
+    BasicModule.init(&ctx).await.unwrap();
 }
 
 #[tokio::test]
@@ -238,22 +245,19 @@ async fn test_full_capabilities() {
     assert_eq!(FullFeaturedModule::MODULE_NAME, "full_featured");
 
     let ctx = ModuleCtxBuilder::new(CancellationToken::new()).build();
-    FullFeaturedModule::default().init(&ctx).await.unwrap();
+    FullFeaturedModule.init(&ctx).await.unwrap();
 
     // REST sync phase
     let router = axum::Router::new();
-    let mut oas = TestOpenApiRegistry::default();
-    let _router = FullFeaturedModule::default()
-        .register_rest(&ctx, router, &mut oas)
+    let oas = TestOpenApiRegistry;
+    let _router = FullFeaturedModule
+        .register_rest(&ctx, router, &oas)
         .unwrap();
 
     // Stateful
     let token = CancellationToken::new();
-    FullFeaturedModule::default()
-        .start(token.clone())
-        .await
-        .unwrap();
-    FullFeaturedModule::default().stop(token).await.unwrap();
+    FullFeaturedModule.start(token.clone()).await.unwrap();
+    FullFeaturedModule.stop(token).await.unwrap();
 }
 
 #[tokio::test]
@@ -284,16 +288,16 @@ fn test_capability_trait_markers() {
     fn assert_rest<T: RestfulModule>(_: &T) {}
     fn assert_stateful<T: StatefulModule>(_: &T) {}
 
-    assert_module(&BasicModule::default());
-    assert_module(&DependentModule::default());
+    assert_module(&BasicModule);
+    assert_module(&DependentModule);
     assert_module(&CustomCtorModule::default());
 
-    assert_db(&FullFeaturedModule::default());
-    assert_db(&DbOnlyModule::default());
+    assert_db(&FullFeaturedModule);
+    assert_db(&DbOnlyModule);
 
-    assert_rest(&FullFeaturedModule::default());
-    assert_rest(&RestOnlyModule::default());
+    assert_rest(&FullFeaturedModule);
+    assert_rest(&RestOnlyModule);
 
-    assert_stateful(&FullFeaturedModule::default());
-    assert_stateful(&StatefulOnlyModule::default());
+    assert_stateful(&FullFeaturedModule);
+    assert_stateful(&StatefulOnlyModule);
 }

@@ -1,7 +1,9 @@
 [package]
 name = "runtime"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [lib]
 name = "runtime"
@@ -9,7 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-atty = { version = "0.2"}
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 tracing = { workspace = true }
@@ -18,8 +19,7 @@ tracing-log = { workspace = true }
 file-rotate = { workspace = true }
 figment = { version = "0.10", features = ["yaml", "env"] }
 serde_json = { workspace = true }
-tempfile = "3.0"
+tempfile = "3.21"
 tokio = { workspace = true }
-tokio-util = { version = "0.7", features = ["rt"] }
 chrono = { workspace = true }
 thiserror = "2.0"

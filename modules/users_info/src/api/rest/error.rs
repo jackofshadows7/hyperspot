@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use modkit::http::problem::{Problem, ProblemResponse};
+use modkit::api::problem::{Problem, ProblemResponse};
 
 /// Helper to create a ProblemResponse with less boilerplate
 pub fn from_parts(

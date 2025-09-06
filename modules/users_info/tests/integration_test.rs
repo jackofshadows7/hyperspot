@@ -56,7 +56,14 @@ impl modkit::api::OpenApiRegistry for MockOpenApiRegistry {
         // No-op for tests
     }
 
-    fn ensure_schema_raw(&self, root_name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+    fn ensure_schema_raw(
+        &self,
+        root_name: &str,
+        _schemas: Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) -> String {
         // Return the root name for tests
         root_name.to_string()
     }
@@ -285,7 +292,7 @@ async fn test_rest_api_not_found() -> Result<()> {
     let non_existent_id = Uuid::new_v4();
     let request = Request::builder()
         .method("GET")
-        .uri(&format!("/users/{}", non_existent_id))
+        .uri(format!("/users/{}", non_existent_id))
         .body(Body::empty())
         .unwrap();
 

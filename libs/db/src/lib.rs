@@ -20,7 +20,7 @@
 //! # Example
 //! ```rust,no_run
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> db::Result<()> {
 //!     use db::{DbHandle, ConnectOpts};
 //!
 //!     let db = DbHandle::connect("postgres://user:pass@localhost/app", ConnectOpts::default()).await?;
@@ -29,12 +29,30 @@
 //!     #[cfg(feature="pg")]
 //!     {
 //!         let pool = db.sqlx_postgres().unwrap();
-//!         sqlx::query("select 1").execute(pool).await?;
+//!         // Help type inference for doctests: specify database type explicitly
+//!         sqlx::query::<sqlx::Postgres>("select 1").execute(pool).await?;
 //!
-//!         db.with_pg_tx(|tx| async move {
-//!             sqlx::query("select 2").execute(&mut *tx).await?;
-//!             Ok(())
-//!         }).await?;
+//!         // Execute within a dedicated connection (doctest-friendly)
+//!         let mut conn = pool.acquire().await?;
+//!         sqlx::query::<sqlx::Postgres>("select 2").execute(&mut *conn).await?;
+//!     }
+//!
+//!     #[cfg(feature="mysql")]
+//!     {
+//!         let pool = db.sqlx_mysql().unwrap();
+//!         sqlx::query::<sqlx::MySql>("select 1").execute(pool).await?;
+//!
+//!         let mut conn = pool.acquire().await?;
+//!         sqlx::query::<sqlx::MySql>("select 2").execute(&mut *conn).await?;
+//!     }
+//!
+//!     #[cfg(feature="sqlite")]
+//!     {
+//!         let pool = db.sqlx_sqlite().unwrap();
+//!         sqlx::query::<sqlx::Sqlite>("select 1").execute(pool).await?;
+//!
+//!         let mut conn = pool.acquire().await?;
+//!         sqlx::query::<sqlx::Sqlite>("select 2").execute(&mut *conn).await?;
 //!     }
 //!
 //!     // sea-orm (if enabled)
@@ -48,8 +66,6 @@
 //!     Ok(())
 //! }
 //! ```
-
-use anyhow::{bail, Context, Result};
 use std::time::Duration;
 
 #[cfg(feature = "mysql")]
@@ -68,11 +84,43 @@ use sea_orm::SqlxPostgresConnector;
 #[cfg(all(feature = "sea-orm", feature = "sqlite"))]
 use sea_orm::SqlxSqliteConnector;
 
+use thiserror::Error;
+
 // Re-export key types for public API
 pub use advisory_locks::{DbLockGuard, LockConfig};
 
 // Advisory locks module
 pub mod advisory_locks;
+
+/// Library-local result type.
+pub type Result<T> = std::result::Result<T, DbError>;
+
+/// Typed error for the DB handle and helpers.
+#[derive(Debug, Error)]
+pub enum DbError {
+    #[error("Unknown DSN: {0}")]
+    UnknownDsn(String),
+
+    #[error("Feature not enabled: {0}")]
+    FeatureDisabled(&'static str),
+
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+
+    #[cfg(feature = "sea-orm")]
+    #[error(transparent)]
+    Sea(#[from] sea_orm::DbErr),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("SQLite pragma error: {0}")]
+    SqlitePragma(String),
+
+    // make advisory_locks errors flow into DbError via `?`
+    #[error(transparent)]
+    Lock(#[from] advisory_locks::DbLockError),
+}
 
 /// Supported engines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,19 +131,37 @@ pub enum DbEngine {
 }
 
 /// Connection options.
+/// Extended to cover common sqlx pool knobs; each driver applies the subset it supports.
 #[derive(Clone, Debug)]
 pub struct ConnectOpts {
+    /// Maximum number of connections in the pool.
     pub max_conns: Option<u32>,
+    /// Minimum number of connections in the pool.
+    pub min_conns: Option<u32>,
+    /// Timeout to acquire a connection from the pool.
     pub acquire_timeout: Option<Duration>,
+    /// Idle timeout before a connection is closed.
+    pub idle_timeout: Option<Duration>,
+    /// Maximum lifetime for a connection.
+    pub max_lifetime: Option<Duration>,
+    /// Test connection health before acquire.
+    pub test_before_acquire: bool,
+
+    /// SQLite-specific: busy timeout used via PRAGMA busy_timeout.
     pub sqlite_busy_timeout: Option<Duration>,
-    /// Create parent directories for SQLite file path DSNs.
+    /// For SQLite file DSNs, create parent directories if missing.
     pub create_sqlite_dirs: bool,
 }
 impl Default for ConnectOpts {
     fn default() -> Self {
         Self {
             max_conns: Some(10),
+            min_conns: None,
             acquire_timeout: Some(Duration::from_secs(30)),
+            idle_timeout: None,
+            max_lifetime: None,
+            test_before_acquire: false,
+
             sqlite_busy_timeout: Some(Duration::from_millis(5_000)),
             create_sqlite_dirs: true,
         }
@@ -168,8 +234,14 @@ pub struct DbHandle {
 
 impl DbHandle {
     /// Detect engine by DSN.
+    ///
+    /// Note: we only check scheme prefixes and don't mutate the tail (credentials etc.).
     pub fn detect(dsn: &str) -> Result<DbEngine> {
-        let s = dsn.to_ascii_lowercase();
+        // Trim only leading spaces/newlines to be forgiving with env files.
+        let s = dsn.trim_start();
+
+        // Explicit, case-sensitive checks for common schemes.
+        // Add more variants as needed (e.g., postgres+unix://).
         if s.starts_with("postgres://") || s.starts_with("postgresql://") {
             Ok(DbEngine::Postgres)
         } else if s.starts_with("mysql://") {
@@ -177,7 +249,7 @@ impl DbHandle {
         } else if s.starts_with("sqlite:") || s.starts_with("sqlite://") {
             Ok(DbEngine::Sqlite)
         } else {
-            bail!("Unknown DSN: {dsn}");
+            Err(DbError::UnknownDsn(dsn.to_string()))
         }
     }
 
@@ -191,10 +263,22 @@ impl DbHandle {
                 if let Some(n) = opts.max_conns {
                     o = o.max_connections(n);
                 }
+                if let Some(n) = opts.min_conns {
+                    o = o.min_connections(n);
+                }
                 if let Some(t) = opts.acquire_timeout {
                     o = o.acquire_timeout(t);
                 }
-                let pool = o.connect(dsn).await.context("connect postgres")?;
+                if let Some(t) = opts.idle_timeout {
+                    o = o.idle_timeout(t);
+                }
+                if let Some(t) = opts.max_lifetime {
+                    o = o.max_lifetime(t);
+                }
+                if opts.test_before_acquire {
+                    o = o.test_before_acquire(true);
+                }
+                let pool = o.connect(dsn).await?;
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxPostgresConnector::from_sqlx_postgres_pool(pool.clone());
                 Ok(Self {
@@ -211,10 +295,22 @@ impl DbHandle {
                 if let Some(n) = opts.max_conns {
                     o = o.max_connections(n);
                 }
+                if let Some(n) = opts.min_conns {
+                    o = o.min_connections(n);
+                }
                 if let Some(t) = opts.acquire_timeout {
                     o = o.acquire_timeout(t);
                 }
-                let pool = o.connect(dsn).await.context("connect mysql")?;
+                if let Some(t) = opts.idle_timeout {
+                    o = o.idle_timeout(t);
+                }
+                if let Some(t) = opts.max_lifetime {
+                    o = o.max_lifetime(t);
+                }
+                if opts.test_before_acquire {
+                    o = o.test_before_acquire(true);
+                }
+                let pool = o.connect(dsn).await?;
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxMySqlConnector::from_sqlx_mysql_pool(pool.clone());
                 Ok(Self {
@@ -229,16 +325,57 @@ impl DbHandle {
             DbEngine::Sqlite => {
                 let dsn = prepare_sqlite_path(dsn, opts.create_sqlite_dirs)?;
                 let mut o = SqlitePoolOptions::new();
+
                 if let Some(n) = opts.max_conns {
                     o = o.max_connections(n);
+                }
+                if let Some(n) = opts.min_conns {
+                    o = o.min_connections(n);
                 }
                 if let Some(t) = opts.acquire_timeout {
                     o = o.acquire_timeout(t);
                 }
-                let pool = o.connect(&dsn).await.context("connect sqlite")?;
-                apply_sqlite_pragmas(&pool, opts.sqlite_busy_timeout).await?;
+                if let Some(t) = opts.idle_timeout {
+                    o = o.idle_timeout(t);
+                }
+                if let Some(t) = opts.max_lifetime {
+                    o = o.max_lifetime(t);
+                }
+                if opts.test_before_acquire {
+                    o = o.test_before_acquire(true);
+                }
+
+                // Copy busy timeout into the closure (per-connection PRAGMAs)
+                let busy = opts.sqlite_busy_timeout;
+                o = o.after_connect(move |conn, _meta| {
+                    let busy = busy;
+                    Box::pin(async move {
+                        // Each call borrows `conn` mutably for the duration of the await,
+                        // without moving the &mut SqliteConnection itself.
+                        sqlx::query("PRAGMA journal_mode = WAL")
+                            .execute(&mut *conn)
+                            .await?;
+
+                        sqlx::query("PRAGMA synchronous = NORMAL")
+                            .execute(&mut *conn)
+                            .await?;
+
+                        if let Some(ms) = busy {
+                            // PRAGMA can't use bind parameters; use a numeric literal.
+                            let ms = std::cmp::min(ms.as_millis(), i64::MAX as u128) as i64;
+                            let stmt = format!("PRAGMA busy_timeout = {ms}");
+                            sqlx::query(&stmt).execute(&mut *conn).await?;
+                        }
+
+                        Ok(())
+                    })
+                });
+
+                let pool = o.connect(&dsn).await?;
+                // No extra call to apply_sqlite_pragmas here anymore.
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
+
                 Ok(Self {
                     engine,
                     pool: DbPool::Sqlite(pool),
@@ -248,11 +385,11 @@ impl DbHandle {
                 })
             }
             #[cfg(not(feature = "pg"))]
-            DbEngine::Postgres => bail!("PostgreSQL feature not enabled"),
+            DbEngine::Postgres => Err(DbError::FeatureDisabled("PostgreSQL feature not enabled")),
             #[cfg(not(feature = "mysql"))]
-            DbEngine::MySql => bail!("MySQL feature not enabled"),
+            DbEngine::MySql => Err(DbError::FeatureDisabled("MySQL feature not enabled")),
             #[cfg(not(any(feature = "pg", feature = "mysql", feature = "sqlite")))]
-            _ => bail!("No DB features enabled"),
+            _ => Err(DbError::FeatureDisabled("no DB features enabled")),
         }
     }
 
@@ -278,6 +415,7 @@ impl DbHandle {
     pub fn sqlx_postgres(&self) -> Option<&PgPool> {
         match self.pool {
             DbPool::Postgres(ref p) => Some(p),
+            #[cfg(any(feature = "mysql", feature = "sqlite"))]
             _ => None,
         }
     }
@@ -285,6 +423,7 @@ impl DbHandle {
     pub fn sqlx_mysql(&self) -> Option<&MySqlPool> {
         match self.pool {
             DbPool::MySql(ref p) => Some(p),
+            #[cfg(any(feature = "pg", feature = "sqlite"))]
             _ => None,
         }
     }
@@ -292,6 +431,7 @@ impl DbHandle {
     pub fn sqlx_sqlite(&self) -> Option<&SqlitePool> {
         match self.pool {
             DbPool::Sqlite(ref p) => Some(p),
+            #[cfg(any(feature = "pg", feature = "mysql"))]
             _ => None,
         }
     }
@@ -316,11 +456,22 @@ impl DbHandle {
         F: FnOnce(&mut sqlx::Transaction<'_, Postgres>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let pool = self.sqlx_postgres().context("not a postgres pool")?;
+        let pool = self
+            .sqlx_postgres()
+            .ok_or(DbError::FeatureDisabled("not a postgres pool"))?;
         let mut tx = pool.begin().await?;
-        let out = f(&mut tx).await?;
-        tx.commit().await?;
-        Ok(out)
+        let res = f(&mut tx).await;
+        match res {
+            Ok(v) => {
+                tx.commit().await?;
+                Ok(v)
+            }
+            Err(e) => {
+                // Best-effort rollback; keep the original error.
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 
     #[cfg(feature = "mysql")]
@@ -329,11 +480,21 @@ impl DbHandle {
         F: FnOnce(&mut sqlx::Transaction<'_, MySql>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let pool = self.sqlx_mysql().context("not a mysql pool")?;
+        let pool = self
+            .sqlx_mysql()
+            .ok_or(DbError::FeatureDisabled("not a mysql pool"))?;
         let mut tx = pool.begin().await?;
-        let out = f(&mut tx).await?;
-        tx.commit().await?;
-        Ok(out)
+        let res = f(&mut tx).await;
+        match res {
+            Ok(v) => {
+                tx.commit().await?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 
     #[cfg(feature = "sqlite")]
@@ -342,11 +503,21 @@ impl DbHandle {
         F: FnOnce(&mut sqlx::Transaction<'_, Sqlite>) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
     {
-        let pool = self.sqlx_sqlite().context("not a sqlite pool")?;
+        let pool = self
+            .sqlx_sqlite()
+            .ok_or(DbError::FeatureDisabled("not a sqlite pool"))?;
         let mut tx = pool.begin().await?;
-        let out = f(&mut tx).await?;
-        tx.commit().await?;
-        Ok(out)
+        let res = f(&mut tx).await;
+        match res {
+            Ok(v) => {
+                tx.commit().await?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 
     // --- Advisory locks ---
@@ -393,7 +564,7 @@ impl DbHandle {
                 Ok(DbTransaction::Sqlite(tx))
             }
             #[cfg(not(any(feature = "pg", feature = "mysql", feature = "sqlite")))]
-            _ => unreachable!("No database features enabled"),
+            _ => Err(DbError::FeatureDisabled("no database backends enabled")),
         }
     }
 }
@@ -401,15 +572,20 @@ impl DbHandle {
 // ===================== helpers =====================
 
 #[cfg(feature = "sqlite")]
+#[allow(dead_code)]
 async fn apply_sqlite_pragmas(pool: &SqlitePool, busy: Option<Duration>) -> Result<()> {
     // Sane defaults for app DBs; adjust to your needs.
-    sqlx::query("PRAGMA journal_mode=WAL").execute(pool).await?;
-    sqlx::query("PRAGMA synchronous=NORMAL")
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = NORMAL")
         .execute(pool)
         .await?;
     if let Some(ms) = busy {
-        // busy_timeout expects integer milliseconds.
-        sqlx::query(&format!("PRAGMA busy_timeout={}", ms.as_millis()))
+        // Prefer bound parameter; ensure type fits into i64.
+        let ms = i64::try_from(ms.as_millis()).unwrap_or(i64::MAX);
+        sqlx::query("PRAGMA busy_timeout = ?")
+            .bind(ms)
             .execute(pool)
             .await?;
     }
@@ -437,8 +613,8 @@ fn prepare_sqlite_path(dsn: &str, create_dirs: bool) -> Result<String> {
     if !raw.starts_with("file:") && !raw.contains('?') {
         if let Some(parent) = std::path::Path::new(raw).parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create dir for sqlite: {parent:?}"))?;
+                // One-time blocking call during startup; acceptable for setup paths.
+                std::fs::create_dir_all(parent)?;
             }
         }
     }
@@ -486,13 +662,12 @@ mod tests {
         let dsn = "sqlite:file:memdb1?mode=memory&cache=shared";
         let db = DbHandle::connect(dsn, ConnectOpts::default()).await?;
 
-        let test_id = format!(
-            "test_basic_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let test_id = format!("test_basic_{now}");
 
         let guard1 = db.lock("test_module", &format!("{}_key1", test_id)).await?;
         let _guard2 = db.lock("test_module", &format!("{}_key2", test_id)).await?;
@@ -512,13 +687,12 @@ mod tests {
         let dsn = "sqlite:file:memdb_diff_keys?mode=memory&cache=shared";
         let db = DbHandle::connect(dsn, ConnectOpts::default()).await?;
 
-        let test_id = format!(
-            "test_diff_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let test_id = format!("test_diff_{now}");
 
         let _guard1 = db.lock("test_module", &format!("{}_key1", test_id)).await?;
         let _guard2 = db.lock("test_module", &format!("{}_key2", test_id)).await?;
@@ -534,13 +708,12 @@ mod tests {
         let dsn = "sqlite:file:memdb2?mode=memory&cache=shared";
         let db = DbHandle::connect(dsn, ConnectOpts::default()).await?;
 
-        let test_id = format!(
-            "test_config_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let test_id = format!("test_config_{now}");
 
         let _guard1 = db.lock("test_module", &format!("{}_key", test_id)).await?;
 

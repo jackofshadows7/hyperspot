@@ -7,9 +7,12 @@ use tokio_util::sync::CancellationToken;
 use thiserror::Error;
 
 // Re-exported contracts are referenced but not defined here.
-use crate::contracts;
 use crate::context;
+use crate::contracts;
 use db;
+
+/// Type alias for REST host module configuration.
+type RestHostEntry = (&'static str, Arc<dyn contracts::RestHostModule>);
 
 pub struct ModuleEntry {
     pub name: &'static str,
@@ -63,7 +66,7 @@ impl ModuleRegistry {
     pub fn discover_and_build() -> Result<Self, RegistryError> {
         let mut b = RegistryBuilder::default();
         for r in ::inventory::iter::<Registrator> {
-            (r.0)(&mut b);
+            r.0(&mut b);
         }
         b.build_topo_sorted()
     }
@@ -76,7 +79,10 @@ impl ModuleRegistry {
             e.core
                 .init(&ctx)
                 .await
-                .map_err(|source| RegistryError::Init { module: e.name, source: source.into() })?;
+                .map_err(|source| RegistryError::Init {
+                    module: e.name,
+                    source,
+                })?;
         }
         Ok(())
     }
@@ -88,7 +94,10 @@ impl ModuleRegistry {
                 // let _lock = db.lock(e.name, "migration").await?;
                 dbm.migrate(db)
                     .await
-                    .map_err(|source| RegistryError::DbMigrate { module: e.name, source: source.into() })?;
+                    .map_err(|source| RegistryError::DbMigrate {
+                        module: e.name,
+                        source,
+                    })?;
             }
         }
         Ok(())
@@ -108,10 +117,10 @@ impl ModuleRegistry {
 
         match hosts.len() {
             0 => {
-                if self.modules.iter().any(|e| e.rest.is_some()) {
-                    return Err(RegistryError::RestRequiresHost);
+                return if self.modules.iter().any(|e| e.rest.is_some()) {
+                    Err(RegistryError::RestRequiresHost)
                 } else {
-                    return Ok(router);
+                    Ok(router)
                 }
             }
             1 => { /* proceed */ }
@@ -134,9 +143,12 @@ impl ModuleRegistry {
         let registry: &dyn contracts::OpenApiRegistry = host.as_registry();
 
         // 1) Host prepare: base Router / global middlewares / basic OAS meta
-        router = host
-            .rest_prepare(&host_ctx, router)
-            .map_err(|source| RegistryError::RestPrepare { module: host_entry.name, source: source.into() })?;
+        router =
+            host.rest_prepare(&host_ctx, router)
+                .map_err(|source| RegistryError::RestPrepare {
+                    module: host_entry.name,
+                    source,
+                })?;
 
         // 2) Register all REST providers (in the current discovery order)
         for e in &self.modules {
@@ -144,14 +156,20 @@ impl ModuleRegistry {
                 let ctx = base_ctx.clone().for_module(e.name);
                 router = rest
                     .register_rest(&ctx, router, registry)
-                    .map_err(|source| RegistryError::RestRegister { module: e.name, source: source.into() })?;
+                    .map_err(|source| RegistryError::RestRegister {
+                        module: e.name,
+                        source,
+                    })?;
             }
         }
 
         // 3) Host finalize: attach /openapi.json and /docs, persist Router if needed (no server start)
-        router = host
-            .rest_finalize(&host_ctx, router)
-            .map_err(|source| RegistryError::RestFinalize { module: host_entry.name, source: source.into() })?;
+        router = host.rest_finalize(&host_ctx, router).map_err(|source| {
+            RegistryError::RestFinalize {
+                module: host_entry.name,
+                source,
+            }
+        })?;
 
         Ok(router)
     }
@@ -161,7 +179,10 @@ impl ModuleRegistry {
             if let Some(s) = &e.stateful {
                 s.start(cancel.clone())
                     .await
-                    .map_err(|source| RegistryError::Start { module: e.name, source: source.into() })?;
+                    .map_err(|source| RegistryError::Start {
+                        module: e.name,
+                        source,
+                    })?;
             }
         }
         Ok(())
@@ -194,7 +215,7 @@ pub struct RegistryBuilder {
     core: HashMap<&'static str, Arc<dyn contracts::Module>>,
     deps: HashMap<&'static str, &'static [&'static str]>,
     rest: HashMap<&'static str, Arc<dyn contracts::RestfulModule>>,
-    rest_host: Option<(&'static str, Arc<dyn contracts::RestHostModule>)>,
+    rest_host: Option<RestHostEntry>,
     db: HashMap<&'static str, Arc<dyn contracts::DbModule>>,
     stateful: HashMap<&'static str, Arc<dyn contracts::StatefulModule>>,
     errors: Vec<String>,
@@ -239,11 +260,7 @@ impl RegistryBuilder {
         self.rest_host = Some((name, m));
     }
 
-    pub fn register_db_with_meta(
-        &mut self,
-        name: &'static str,
-        m: Arc<dyn contracts::DbModule>,
-    ) {
+    pub fn register_db_with_meta(&mut self, name: &'static str, m: Arc<dyn contracts::DbModule>) {
         self.db.insert(name, m);
     }
 
@@ -263,7 +280,9 @@ impl RegistryBuilder {
             }
         }
         if !self.errors.is_empty() {
-            return Err(RegistryError::InvalidRegistryConfiguration { errors: self.errors });
+            return Err(RegistryError::InvalidRegistryConfiguration {
+                errors: self.errors,
+            });
         }
 
         // 1) ensure every capability references a known core
@@ -303,9 +322,10 @@ impl RegistryBuilder {
                 .get(n)
                 .ok_or_else(|| RegistryError::UnknownModule(n.to_string()))?;
             for &d in deps {
-                let v = *idx
-                    .get(d)
-                    .ok_or_else(|| RegistryError::UnknownDependency { module: n.to_string(), depends_on: d.to_string() })?;
+                let v = *idx.get(d).ok_or_else(|| RegistryError::UnknownDependency {
+                    module: n.to_string(),
+                    depends_on: d.to_string(),
+                })?;
                 // edge d -> n (dep before module)
                 adj[v].push(u);
                 indeg[u] += 1;
@@ -314,8 +334,8 @@ impl RegistryBuilder {
 
         // 3) Kahn’s algorithm
         let mut q = VecDeque::new();
-        for i in 0..names.len() {
-            if indeg[i] == 0 {
+        for (i, &degree) in indeg.iter().enumerate() {
+            if degree == 0 {
                 q.push_back(i);
             }
         }
@@ -489,22 +509,14 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl contracts::RestHostModule for DummyRestHost {
-        fn as_registry(&self) -> &dyn contracts::OpenApiRegistry {
+        fn rest_prepare(&self, _ctx: &ModuleCtx, router: Router) -> Result<Router, anyhow::Error> {
+            Ok(router)
+        }
+        fn rest_finalize(&self, _ctx: &ModuleCtx, router: Router) -> Result<Router, anyhow::Error> {
+            Ok(router)
+        }
+        fn as_registry(&self) -> &dyn OpenApiRegistry {
             &self.reg
-        }
-        fn rest_prepare(
-            &self,
-            _ctx: &ModuleCtx,
-            router: Router,
-        ) -> Result<Router, anyhow::Error> {
-            Ok(router)
-        }
-        fn rest_finalize(
-            &self,
-            _ctx: &ModuleCtx,
-            router: Router,
-        ) -> Result<Router, anyhow::Error> {
-            Ok(router)
         }
     }
 
@@ -516,7 +528,7 @@ mod tests {
             &self,
             _ctx: &ModuleCtx,
             router: Router,
-            _registry: &dyn contracts::OpenApiRegistry,
+            _registry: &dyn OpenApiRegistry,
         ) -> Result<Router, anyhow::Error> {
             Ok(router.route("/dummy", axum::routing::get(|| async { "ok" })))
         }
@@ -528,8 +540,8 @@ mod tests {
     fn topo_sort_happy_path() {
         let mut b = RegistryBuilder::default();
         // cores
-        b.register_core_with_meta("core_a", &[], Arc::new(DummyCore::default()));
-        b.register_core_with_meta("core_b", &["core_a"], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("core_a", &[], Arc::new(DummyCore));
+        b.register_core_with_meta("core_b", &["core_a"], Arc::new(DummyCore));
 
         let reg = b.build_topo_sorted().unwrap();
         let order: Vec<_> = reg.modules().iter().map(|m| m.name).collect();
@@ -539,7 +551,7 @@ mod tests {
     #[test]
     fn unknown_dependency_error() {
         let mut b = RegistryBuilder::default();
-        b.register_core_with_meta("core_a", &["missing_dep"], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("core_a", &["missing_dep"], Arc::new(DummyCore));
 
         let err = b.build_topo_sorted().unwrap_err();
         match err {
@@ -554,8 +566,8 @@ mod tests {
     #[test]
     fn cyclic_dependency_detected() {
         let mut b = RegistryBuilder::default();
-        b.register_core_with_meta("a", &["b"], Arc::new(DummyCore::default()));
-        b.register_core_with_meta("b", &["a"], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("a", &["b"], Arc::new(DummyCore));
+        b.register_core_with_meta("b", &["a"], Arc::new(DummyCore));
 
         let err = b.build_topo_sorted().unwrap_err();
         matches!(err, RegistryError::CyclicDependency);
@@ -564,9 +576,9 @@ mod tests {
     #[test]
     fn duplicate_core_reported_in_configuration_errors() {
         let mut b = RegistryBuilder::default();
-        b.register_core_with_meta("a", &[], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("a", &[], Arc::new(DummyCore));
         // duplicate
-        b.register_core_with_meta("a", &[], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("a", &[], Arc::new(DummyCore));
 
         let err = b.build_topo_sorted().unwrap_err();
         match err {
@@ -584,8 +596,8 @@ mod tests {
     fn rest_requires_host_if_rest_modules_exist() {
         // Build with 1 core that has REST capability, but no rest host.
         let mut b = RegistryBuilder::default();
-        b.register_core_with_meta("svc", &[], Arc::new(DummyCore::default()));
-        b.register_rest_with_meta("svc", Arc::new(DummyRest::default()));
+        b.register_core_with_meta("svc", &[], Arc::new(DummyCore));
+        b.register_rest_with_meta("svc", Arc::new(DummyRest));
         let reg = b.build_topo_sorted().unwrap();
 
         let router = Router::new();
@@ -598,11 +610,11 @@ mod tests {
     fn rest_single_host_and_provider_happy_path() {
         // Build with one host and one REST provider
         let mut b = RegistryBuilder::default();
-        b.register_core_with_meta("host", &[], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("host", &[], Arc::new(DummyCore));
         b.register_rest_host_with_meta("host", Arc::new(DummyRestHost::default()));
 
-        b.register_core_with_meta("svc", &[], Arc::new(DummyCore::default()));
-        b.register_rest_with_meta("svc", Arc::new(DummyRest::default()));
+        b.register_core_with_meta("svc", &[], Arc::new(DummyCore));
+        b.register_rest_with_meta("svc", Arc::new(DummyRest));
 
         let reg = b.build_topo_sorted().unwrap();
 
@@ -619,8 +631,8 @@ mod tests {
     async fn phases_run_without_errors_with_empty_implementations() {
         // No REST, DB, or stateful modules; only init/start/stop with defaults.
         let mut b = RegistryBuilder::default();
-        b.register_core_with_meta("a", &[], Arc::new(DummyCore::default()));
-        b.register_core_with_meta("b", &["a"], Arc::new(DummyCore::default()));
+        b.register_core_with_meta("a", &[], Arc::new(DummyCore));
+        b.register_core_with_meta("b", &["a"], Arc::new(DummyCore));
         let reg = b.build_topo_sorted().unwrap();
 
         // init

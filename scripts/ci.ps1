@@ -9,17 +9,17 @@ param(
 
 function Write-Step {
     param([string]$Message)
-    Write-Host "🔧 $Message" -ForegroundColor Cyan
+    Write-Host "$Message" -ForegroundColor Cyan
 }
 
 function Write-Success {
     param([string]$Message)
-    Write-Host "✅ $Message" -ForegroundColor Green
+    Write-Host "$Message" -ForegroundColor Green
 }
 
 function Write-Error {
     param([string]$Message)
-    Write-Host "❌ $Message" -ForegroundColor Red
+    Write-Host "$Message" -ForegroundColor Red
 }
 
 function Invoke-Format {
@@ -134,7 +134,7 @@ function Invoke-Check {
     Invoke-Clippy
     Invoke-Test
     Invoke-Security
-    Write-Success "All checks passed! ✨"
+    Write-Success "All checks passed!"
 }
 
 function Invoke-Quickstart {
@@ -147,30 +147,6 @@ function Invoke-Quickstart {
     
     Write-Step "Starting server with quickstart configuration..."
     cargo run --bin hyperspot-server -- --config config/quickstart.yaml run
-}
-
-function Invoke-SmokeTest {
-    Write-Step "Running smoke tests..."
-    
-    # Check if bash is available (WSL or Git Bash)
-    if (Get-Command bash -ErrorAction SilentlyContinue) {
-        bash scripts/smoke-test.sh
-    } else {
-        Write-Step "Bash not available. Running basic PowerShell smoke test..."
-        
-        Write-Step "Testing health endpoint..."
-        try {
-            $response = Invoke-RestMethod -Uri "http://localhost:3000/health" -TimeoutSec 5
-            if ($response.status -eq "healthy") {
-                Write-Success "Health endpoint responding correctly"
-            } else {
-                Write-Error "Health endpoint returned unexpected status: $($response.status)"
-            }
-        } catch {
-            Write-Error "Health endpoint not responding. Is the server running?"
-            Write-Host "Start server with: ./scripts/ci.ps1 quickstart" -ForegroundColor Yellow
-        }
-    }
 }
 
 function Show-Help {
@@ -188,7 +164,6 @@ Commands:
   security     Run all security checks (audit + deny)
   check        Run all checks (fmt + clippy + test + security)
   quickstart   Start server in development mode
-  smoke-test   Run smoke tests against running server
   help         Show this help message
 
 Options:
@@ -199,7 +174,6 @@ Examples:
   ./scripts/ci.ps1 fmt -Fix           # Auto-format code
   ./scripts/ci.ps1 clippy -Fix        # Auto-fix clippy issues
   ./scripts/ci.ps1 quickstart         # Start development server
-  ./scripts/ci.ps1 smoke-test         # Test running server
 
 Note: For full make compatibility, install make via:
   winget install GnuWin32.Make
@@ -217,7 +191,6 @@ switch ($Command.ToLower()) {
     "security" { Invoke-Security }
     "check" { Invoke-Check }
     "quickstart" { Invoke-Quickstart }
-    "smoke-test" { Invoke-SmokeTest }
     "help" { Show-Help }
     default { 
         Write-Error "Unknown command: $Command"

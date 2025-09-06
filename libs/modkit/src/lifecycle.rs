@@ -17,6 +17,14 @@ type LcResult<T = ()> = std::result::Result<T, LifecycleError>;
 /// Result returned by user/background tasks.
 type TaskResult<T = ()> = anyhow::Result<T>;
 
+/// Type alias for ready function pointer to reduce complexity.
+type ReadyFn<T> = fn(
+    Arc<T>,
+    CancellationToken,
+    ReadySignal,
+)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskResult<()>> + Send>>;
+
 // ----- Status model ----------------------------------------------------------
 
 /// Terminal/transition states for a background job.
@@ -394,14 +402,7 @@ pub struct WithLifecycle<T: Runnable> {
     // lifecycle start mode configuration
     await_ready: bool,
     has_ready_handler: bool,
-    #[allow(clippy::type_complexity)]
-    run_ready_fn: Option<
-        fn(
-            Arc<T>,
-            CancellationToken,
-            ReadySignal,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskResult<()>> + Send>>,
-    >,
+    run_ready_fn: Option<ReadyFn<T>>,
 }
 
 impl<T: Runnable> WithLifecycle<T> {
@@ -453,14 +454,7 @@ impl<T: Runnable> WithLifecycle<T> {
         mut self,
         await_ready: bool,
         has_ready_handler: bool,
-        run_ready_fn: Option<
-            fn(
-                Arc<T>,
-                CancellationToken,
-                ReadySignal,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskResult<()>> + Send>>,
-        >,
+        run_ready_fn: Option<ReadyFn<T>>,
     ) -> Self {
         self.await_ready = await_ready;
         self.has_ready_handler = has_ready_handler;
@@ -750,7 +744,7 @@ mod tests {
         wrapper.start(cancel.clone()).await.unwrap();
         let err = wrapper.start(cancel).await;
         assert!(err.is_err());
-        let _ = wrapper.stop(CancellationToken::new()).await.unwrap();
+        wrapper.stop(CancellationToken::new()).await.unwrap();
     }
 
     #[tokio::test]

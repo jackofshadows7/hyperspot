@@ -5,8 +5,13 @@
 //! response are specified.
 
 pub mod operation_builder;
+pub mod problem;
 
 pub use operation_builder::{
-    state, Missing, OpenApiRegistry, OperationBuilder, OperationSpec, ParamLocation, ParamSpec,
-    Present, ResponseSpec, ensure_schema,
+    ensure_schema, state, Missing, OpenApiRegistry, OperationBuilder, OperationSpec, ParamLocation,
+    ParamSpec, Present, ResponseSpec,
+};
+pub use problem::{
+    bad_request, conflict, internal_error, not_found, Problem, ProblemResponse, ValidationError,
+    APPLICATION_PROBLEM_JSON,
 };

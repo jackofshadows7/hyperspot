@@ -223,6 +223,7 @@ async fn run_server(config: AppConfig, args: CliArgs) -> Result<()> {
                         .busy_timeout_ms
                         .map(|ms| Duration::from_millis(ms as u64)),
                     create_sqlite_dirs: true,
+                    ..Default::default()
                 };
 
                 tracing::info!("Connecting to database: {}", final_dsn);
@@ -255,7 +256,7 @@ async fn check_config(config: AppConfig) -> Result<()> {
 
     // AppConfig::load_* already normalized & created home_dir
     tracing::info!("Configuration is valid");
-    println!("✅ Configuration check passed");
+    println!("Configuration check passed");
     println!("Server config:");
     println!("{}", config.to_yaml()?);
 
