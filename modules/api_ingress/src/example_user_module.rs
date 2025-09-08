@@ -8,8 +8,8 @@ use axum::{
     routing::get,
     Router,
 };
-use utoipa::ToSchema;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use modkit::contracts::{Module, OpenApiRegistry, RestfulModule};
 
@@ -50,6 +50,7 @@ pub trait UserApi: Send + Sync {
 
 // Simple local implementation (stub/demo)
 #[derive(Default)]
+#[allow(dead_code)]
 struct LocalUserClient;
 
 impl UserApi for LocalUserClient {

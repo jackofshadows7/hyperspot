@@ -1,7 +1,9 @@
 [package]
 name = "db"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [features]
 pg = ["sqlx/postgres", "sea-orm?/sqlx-postgres"]
@@ -14,17 +16,15 @@ default = ["sea-orm"]
 anyhow = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "macros", "uuid", "chrono"] }
-fd-lock = "4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-dirs = "5"
+dirs = "6"
 chrono = { version = "0.4", features = ["serde", "clock"] }
-uuid = { version = "1", features = ["v4", "serde"] }
 # optional ORM
 sea-orm = { version = "1", optional = true, default-features = false, features = ["runtime-tokio-rustls"] }
 thiserror = "2.0"
-tracing = "0.1.41"
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
-dirs = "5"
+dirs = "6"
 

@@ -371,6 +371,12 @@ logging:
         let tmp = tempdir().unwrap();
         let cfg_path = tmp.path().join("cfg.yaml");
 
+        // Set up environment variables for home directory resolution
+        #[cfg(target_os = "windows")]
+        env::set_var("APPDATA", tmp.path());
+        #[cfg(not(target_os = "windows"))]
+        env::set_var("HOME", tmp.path());
+
         let yaml = r#"
 server:
   home_dir: "~/.minimal"

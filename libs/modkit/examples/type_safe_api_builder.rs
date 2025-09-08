@@ -38,7 +38,14 @@ impl OpenApiRegistry for ExampleRegistry {
         let _ = spec;
     }
 
-    fn ensure_schema_raw(&self, root_name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+    fn ensure_schema_raw(
+        &self,
+        root_name: &str,
+        _schemas: Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) -> String {
         // Example implementation - schemas not tracked, just return the name
         root_name.to_string()
     }
@@ -159,5 +166,5 @@ async fn main() {
     println!("     .tag(\"example\")             // ← Can be anywhere");
     println!("     .register(router, registry) // ← Always at the end");
 
-    println!("\n🎉 All operations built successfully with compile-time type safety!");
+    println!("\nAll operations built successfully with compile-time type safety!");
 }

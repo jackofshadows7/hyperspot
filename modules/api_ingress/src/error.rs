@@ -6,6 +6,10 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
+/// Type alias for error response tuple (without details).
+/// We keep `details` separately as `Option<String>` to avoid lifetime issues.
+type ErrorResponseTuple<'a> = (StatusCode, &'static str, &'a str);
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("{0}")]
@@ -40,45 +44,40 @@ impl IntoResponse for AppError {
         use AppError::*;
 
         // Extract request_id from current span context if available
-        // Note: We'll get the request_id from extensions in handlers
+        // Note: In real handlers we will get request_id from extensions
         let request_id = "unknown";
 
-        #[allow(unused_variables)]
-        let (status, code, safe_msg, details): (StatusCode, &str, &str, Option<&str>) = match &self
-        {
-            BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.as_str(), None),
-            Unauthorized(m) => (StatusCode::UNAUTHORIZED, "unauthorized", m.as_str(), None),
-            Forbidden(m) => (StatusCode::FORBIDDEN, "forbidden", m.as_str(), None),
-            NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.as_str(), None),
-            Conflict(m) => (StatusCode::CONFLICT, "conflict", m.as_str(), None),
+        // Keep details as owned String to avoid dangling references
+        #[cfg(feature = "debug-errors")]
+        let mut dbg_details: Option<String> = None;
+
+        // Map AppError to tuple (status, code, safe_msg)
+        let (status, code, safe_msg): ErrorResponseTuple = match &self {
+            BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.as_str()),
+            Unauthorized(m) => (StatusCode::UNAUTHORIZED, "unauthorized", m.as_str()),
+            Forbidden(m) => (StatusCode::FORBIDDEN, "forbidden", m.as_str()),
+            NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.as_str()),
+            Conflict(m) => (StatusCode::CONFLICT, "conflict", m.as_str()),
             TooManyRequests => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limited",
                 "rate limited",
-                None,
             ),
             Internal(err) => {
                 #[cfg(feature = "debug-errors")]
                 {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "internal error",
-                        Some(err.to_string().as_str()),
-                    )
+                    // Save error details as String, later exposed as Option<&str>
+                    dbg_details = Some(err.to_string());
                 }
-                #[cfg(not(feature = "debug-errors"))]
-                {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "internal error",
-                        None,
-                    )
-                }
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "internal error",
+                )
             }
         };
 
+        // Log error with appropriate severity
         match &self {
             Internal(err) => tracing::error!(
                 request_id = %request_id,
@@ -94,13 +93,15 @@ impl IntoResponse for AppError {
             ),
         }
 
+        // Build JSON response body
         let body = ErrorBody {
             code,
             message: safe_msg,
             request_id: Some(request_id),
             #[cfg(feature = "debug-errors")]
-            details,
+            details: dbg_details.as_deref(),
         };
+
         (status, Json(body)).into_response()
     }
 }

@@ -6,6 +6,7 @@ use axum::{
 use serde_json::{json, Value};
 
 /// Returns a 501 Not Implemented handler for operations without implementations
+#[allow(dead_code)]
 pub fn placeholder_handler_501() -> MethodRouter {
     get(|| async move {
         (

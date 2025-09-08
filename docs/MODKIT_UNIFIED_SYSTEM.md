@@ -278,7 +278,7 @@ Pass a state once via `Router::with_state(S)`. Handlers are free functions takin
 
 ## Error handling (RFC-9457)
 
-ModKit provides centralized types in `modkit::http::problem`:
+ModKit provides centralized types in `modkit::api::problem`:
 
 * `Problem` — RFC-9457 Problem Details
 * `ValidationError` — itemized validation error
@@ -287,7 +287,7 @@ ModKit provides centralized types in `modkit::http::problem`:
 **Handler example**
 
 ```rust
-use modkit::http::problem::{ProblemResponse, bad_request, conflict, internal_error};
+use modkit::api::problem::{ProblemResponse, bad_request, conflict, internal_error};
 use axum::{extract::State, Json};
 use http::StatusCode;
 

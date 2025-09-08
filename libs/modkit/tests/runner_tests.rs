@@ -23,11 +23,19 @@ use modkit::{
 type CallTracker = Arc<Mutex<Vec<String>>>;
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct TestOpenApiRegistry;
 
 impl OpenApiRegistry for TestOpenApiRegistry {
     fn register_operation(&self, _spec: &modkit::api::OperationSpec) {}
-    fn ensure_schema_raw(&self, root_name: &str, _schemas: Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) -> String {
+    fn ensure_schema_raw(
+        &self,
+        root_name: &str,
+        _schemas: Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) -> String {
         root_name.to_string()
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -85,6 +93,7 @@ struct TestModule {
     should_fail_stop: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl TestModule {
     fn new(name: &str, calls: CallTracker) -> Self {
         Self {
@@ -225,14 +234,13 @@ fn create_test_registry(modules: Vec<TestModule>) -> anyhow::Result<ModuleRegist
 fn create_mock_db_factory() -> DbFactory {
     Box::new(|| {
         Box::pin(async {
-            // Create a simple in-memory SQLite DB for testing
             match db::DbHandle::connect("sqlite::memory:", db::ConnectOpts::default()).await {
                 Ok(handle) => Ok(Arc::new(handle)),
-                Err(e) if e.to_string().contains("No DB features enabled") => {
-                    // Return a mock error if DB features aren't available
-                    anyhow::bail!("DB features not enabled in test environment")
+                Err(e) if matches!(e, db::DbError::FeatureDisabled(_)) => {
+                    // Preserve original error but wrap into anyhow
+                    anyhow::bail!("DB features not enabled in test environment: {e}")
                 }
-                Err(e) => Err(e),
+                Err(e) => Err(anyhow::Error::new(e)), // convert DbError -> anyhow::Error
             }
         })
     })
@@ -267,7 +275,7 @@ async fn test_db_options_existing() {
     let cancel = CancellationToken::new();
     cancel.cancel(); // Immediate shutdown
 
-    // Try to create a DB handle, but skip the test if DB features aren't available
+    // Returns db::Result<DbHandle> now (typed error)
     let db_result = db::DbHandle::connect("sqlite::memory:", db::ConnectOpts::default()).await;
 
     match db_result {
@@ -278,16 +286,18 @@ async fn test_db_options_existing() {
                 shutdown: ShutdownOptions::Token(cancel),
             };
 
-            let result = timeout(Duration::from_millis(100), run(opts)).await;
-            assert!(result.is_ok());
+            let result = timeout(Duration::from_millis(250), run(opts)).await;
+            assert!(result.is_ok(), "run() did not complete within timeout");
         }
-        Err(e) if e.to_string().contains("No DB features enabled") => {
-            // Skip test if DB features aren't available
-            println!("Skipping test_db_options_existing: DB features not enabled");
+
+        // Skip when DB backends are not compiled in
+        Err(db::DbError::FeatureDisabled(_)) => {
+            eprintln!("Skipping test_db_options_existing: DB features not enabled");
             return;
         }
+
         Err(e) => {
-            panic!("Unexpected DB error: {}", e);
+            panic!("Unexpected DB error: {e}");
         }
     }
 }

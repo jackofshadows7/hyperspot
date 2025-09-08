@@ -128,6 +128,6 @@ async fn external_cancellation_is_linked_through_withlifecycle() {
     module.start(external.clone()).await.unwrap();
     // Cancel externally and expect graceful stop
     external.cancel();
-    let _ = module.stop(CancellationToken::new()).await.unwrap();
+    module.stop(CancellationToken::new()).await.unwrap();
     assert_eq!(module.status(), Status::Stopped);
 }

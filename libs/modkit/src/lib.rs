@@ -51,9 +51,8 @@ pub use api::{OpenApiRegistry, OperationBuilder};
 
 // HTTP utilities
 pub mod http;
-pub use http::problem::{
-    Problem, ProblemResponse, ValidationError,
-    bad_request, conflict, internal_error, not_found,
+pub use api::problem::{
+    bad_request, conflict, internal_error, not_found, Problem, ProblemResponse, ValidationError,
 };
 
 pub mod lifecycle;

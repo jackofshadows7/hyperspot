@@ -41,6 +41,7 @@ pub async fn push_req_id_to_extensions(mut req: Request<Body>, next: Next) -> Re
 }
 
 /// Create trace layer with proper typing  
+#[allow(clippy::type_complexity)]
 pub fn create_trace_layer() -> tower_http::trace::TraceLayer<
     tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>,
     impl Fn(&Request<Body>) -> tracing::Span + Clone,

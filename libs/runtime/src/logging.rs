@@ -1,5 +1,5 @@
 use crate::config::{LoggingConfig, Section};
-use atty;
+use std::io::IsTerminal;
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -90,7 +90,7 @@ impl std::io::Write for RoutedWriterHandle {
         if let Some(w) = &mut self.0 {
             w.write(buf)
         } else {
-            // drop silently; pretend we wrote everything
+            // Drop silently; pretend we wrote everything
             Ok(buf.len())
         }
     }
@@ -130,7 +130,7 @@ impl<'a> fmt::MakeWriter<'a> for MultiFileRouter {
     type Writer = RoutedWriterHandle;
 
     fn make_writer(&'a self) -> Self::Writer {
-        // used rarely; use default file if any
+        // Used rarely; use default file if any
         RoutedWriterHandle(self.default.as_ref().map(|w| RotWriterHandle(w.0.clone())))
     }
 
@@ -193,7 +193,6 @@ fn create_rotating_writer_at_path(
         AppendTimestamp::default(FileLimit::Age(chrono::Duration::days(1))),
         ContentLimit::BytesSurpassed(max_bytes),
         Compression::None,
-        #[cfg(unix)]
         None, // file permissions (Unix only)
     );
 
@@ -345,7 +344,7 @@ fn build_logging_layers(
 ) {
     use tracing_subscriber::{fmt, layer::SubscriberExt, prelude::*, Registry};
 
-    let ansi = atty::is(atty::Stream::Stdout);
+    let ansi = std::io::stdout().is_terminal();
 
     let console_layer = fmt::layer()
         .with_ansi(ansi)

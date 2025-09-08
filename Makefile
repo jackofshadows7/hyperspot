@@ -40,7 +40,3 @@ quickstart:
 	mkdir -p data
 	cargo run --bin hyperspot-server -- --config config/quickstart.yaml run
 
-smoke-test:
-	@echo "Starting smoke tests..."
-	@./scripts/smoke-test.sh || echo "Note: Run 'make quickstart' in another terminal first"
-

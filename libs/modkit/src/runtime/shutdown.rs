@@ -11,7 +11,7 @@ pub async fn wait_for_shutdown() -> Result<()> {
             _ = sigint.recv()  => {},
             _ = tokio::signal::ctrl_c() => {}, // fallback
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]
