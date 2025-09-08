@@ -1,6 +1,7 @@
 [package]
 name = "users_info"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -44,8 +45,8 @@ sea-orm-migration = "1.1"
 thiserror = "2.0"
 
 # Local dependencies
-modkit = { path = "../../libs/modkit" }
-db = { path = "../../libs/db" }
+modkit = { path = "../../../libs/modkit" }
+db = { path = "../../../libs/db" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

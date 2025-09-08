@@ -1344,7 +1344,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "users_info",
 ]
 
 [[package]]
