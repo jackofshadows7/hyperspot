@@ -1,0 +1,3 @@
+[submodule "guidelines/hapig"]
+       path = guidelines/hapig
+       url = https://github.com/hypernetix/hapig
