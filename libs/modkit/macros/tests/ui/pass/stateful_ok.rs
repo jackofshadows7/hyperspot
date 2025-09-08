@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
 #[derive(Default)]
-#[module(name = "demo", caps = [stateful], lifecycle(entry = "serve", stop_timeout = "1s"))]
+#[module(name = "demo", capabilities = [stateful], lifecycle(entry = "serve", stop_timeout = "1s"))]
 pub struct Demo;
 
 impl Demo {

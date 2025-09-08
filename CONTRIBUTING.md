@@ -130,7 +130,7 @@ Then create a Pull Request on GitHub with:
 2. **Define module structure**:
    ```rust
    #[derive(Clone, Default)]
-   #[module(name = "my_module", deps = [], caps = [core], client = MyModuleClient)]
+   #[module(name = "my_module", deps = [], capabilities = [core], client = MyModuleClient)]
    pub struct MyModule {
        config: Arc<RwLock<MyModuleConfig>>,
    }

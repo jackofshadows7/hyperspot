@@ -136,7 +136,7 @@ Attach the attribute to your main struct. The macro:
 #[modkit::module(
     name = "my_module",
     deps = ["foo", "bar"], // api_ingress dependency will be added automatically for rest module capability
-    caps = [db, rest, stateful, /* rest_host if you own the HTTP server */],
+    capabilities = [db, rest, stateful, /* rest_host if you own the HTTP server */],
     client = "contract::client::MyModuleApi",
     ctor = MyModule::new(),
     lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
@@ -172,7 +172,7 @@ Generated helpers:
 ```rust
 #[modkit::module(
     name = "api_ingress",
-    caps = [rest_host, rest, stateful],
+    capabilities = [rest_host, rest, stateful],
     lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
 pub struct ApiIngress { /* ... */ }

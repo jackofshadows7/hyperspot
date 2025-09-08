@@ -444,7 +444,7 @@ Add an optional nested attr to `#[modkit::module]`:
 ```rust
 #[modkit::module(
   name="mymodule",
-  caps=[stateful],             // no rest_host/rest here (ingress owns HTTP)
+  capabilities=[stateful],             // no rest_host/rest here (ingress owns HTTP)
   client="contract::client::MyModuleApi",
   oop(                          // enables ProxyModule behavior
     binary="mymodule",

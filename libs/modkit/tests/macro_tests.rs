@@ -48,7 +48,7 @@ impl Module for BasicModule {
 }
 
 #[derive(Default)]
-#[module(name = "full_featured", caps = [db, rest, stateful])]
+#[module(name = "full_featured", capabilities = [db, rest, stateful])]
 struct FullFeaturedModule;
 
 #[async_trait]
@@ -123,7 +123,7 @@ impl Module for CustomCtorModule {
 }
 
 #[derive(Default)]
-#[module(name = "db_only", caps = [db])]
+#[module(name = "db_only", capabilities = [db])]
 struct DbOnlyModule;
 #[async_trait]
 impl Module for DbOnlyModule {
@@ -142,7 +142,7 @@ impl DbModule for DbOnlyModule {
 }
 
 #[derive(Default)]
-#[module(name = "rest_only", caps = [rest])]
+#[module(name = "rest_only", capabilities = [rest])]
 struct RestOnlyModule;
 #[async_trait]
 impl Module for RestOnlyModule {
@@ -165,7 +165,7 @@ impl RestfulModule for RestOnlyModule {
 }
 
 #[derive(Default)]
-#[module(name = "rest_host", caps = [rest_host])]
+#[module(name = "rest_host", capabilities = [rest_host])]
 struct TestRestHostModule {
     registry: TestOpenApiRegistry,
 }
@@ -203,7 +203,7 @@ impl RestHostModule for TestRestHostModule {
 }
 
 #[derive(Default)]
-#[module(name = "stateful_only", caps = [stateful])]
+#[module(name = "stateful_only", capabilities = [stateful])]
 struct StatefulOnlyModule;
 #[async_trait]
 impl Module for StatefulOnlyModule {

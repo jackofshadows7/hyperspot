@@ -15,7 +15,7 @@ use crate::gateways::local::UsersInfoLocalClient;
 /// Main module struct with DDD-light layout and proper ClientHub integration
 #[modkit::module(
     name = "users_info",
-    caps = [db, rest],
+    capabilities = [db, rest],
     client = crate::contract::client::UsersInfoApi
 )]
 #[derive(Default)]

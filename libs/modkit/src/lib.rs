@@ -15,7 +15,7 @@
 //! use modkit::{module, Module, DbModule, RestfulModule, StatefulModule};
 //!
 //! #[derive(Default)]
-//! #[module(name = "user", deps = ["database"], caps = [db, rest, stateful])]
+//! #[module(name = "user", deps = ["database"], capabilities = [db, rest, stateful])]
 //! pub struct UserModule;
 //!
 //! // Implement the declared capabilities...
