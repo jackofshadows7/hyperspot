@@ -16,7 +16,6 @@ runtime = { path = "../../libs/runtime" }
 modkit = { path = "../../libs/modkit" }
 db = { path = "../../libs/db", features = ["sqlite"] }
 api_ingress = { path = "../../modules/api_ingress"}
-users_info = { path = "../../modules/users_info" }
 
 anyhow = { workspace = true }
 tokio = { workspace = true }
