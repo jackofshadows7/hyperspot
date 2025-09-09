@@ -130,6 +130,7 @@ dependencies = [
  "axum 0.8.4",
  "chrono",
  "dashmap",
+ "futures",
  "http",
  "indexmap 2.11.0",
  "inventory",
@@ -948,6 +949,7 @@ checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -1027,6 +1029,7 @@ version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -1747,6 +1750,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "db",
+ "futures",
  "http",
  "inventory",
  "modkit-macros",
@@ -1756,6 +1760,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "trybuild",
@@ -3570,6 +3575,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3915,6 +3921,7 @@ dependencies = [
  "axum 0.8.4",
  "chrono",
  "db",
+ "futures",
  "inventory",
  "modkit",
  "sea-orm",
@@ -3924,6 +3931,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower 0.5.2",
+ "tower-http",
  "tracing",
  "utoipa",
  "uuid",

@@ -545,6 +545,31 @@ where
             _state: self._state,
         }
     }
+
+    /// First response: SSE stream of JSON events (`text/event-stream`).
+    pub fn sse_json<T>(
+        mut self,
+        openapi: &dyn OpenApiRegistry,
+        description: impl Into<String>,
+    ) -> OperationBuilder<H, Present, S>
+    where
+        T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
+    {
+        let name = ensure_schema::<T>(openapi);
+        self.spec.responses.push(ResponseSpec {
+            status: 200,
+            content_type: "text/event-stream",
+            description: description.into(),
+            schema_name: Some(name),
+        });
+        OperationBuilder {
+            spec: self.spec,
+            method_router: self.method_router,
+            _has_handler: self._has_handler,
+            _has_response: PhantomData::<Present>,
+            _state: self._state,
+        }
+    }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -620,6 +645,25 @@ where
             content_type: problem::APPLICATION_PROBLEM_JSON,
             description: description.into(),
             schema_name: Some(problem_name),
+        });
+        self
+    }
+
+    /// Additional SSE response (if the operation already has a response).
+    pub fn sse_json<T>(
+        mut self,
+        openapi: &dyn OpenApiRegistry,
+        description: impl Into<String>,
+    ) -> Self
+    where
+        T: utoipa::ToSchema + utoipa::PartialSchema + 'static,
+    {
+        let name = ensure_schema::<T>(openapi);
+        self.spec.responses.push(ResponseSpec {
+            status: 200,
+            content_type: "text/event-stream",
+            description: description.into(),
+            schema_name: Some(name),
         });
         self
     }

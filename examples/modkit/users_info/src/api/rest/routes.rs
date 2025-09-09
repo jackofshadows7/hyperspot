@@ -1,6 +1,9 @@
-use axum::{Extension, Router};
+use axum::{routing::get, Extension, Router};
 use modkit::api::{OpenApiRegistry, OperationBuilder};
+use modkit::SseBroadcaster;
 use std::sync::Arc;
+use std::time::Duration;
+use tower_http::timeout::TimeoutLayer;
 
 use crate::api::rest::{dto, handlers};
 use crate::domain::service::Service;
@@ -83,7 +86,26 @@ pub fn register_routes(
             .problem_response(openapi, 500, "Internal Server Error")
             .register(router, openapi);
 
+    // SSE /users/events - Real-time user events stream with extended timeout
+    // Create a broadcaster for user events (capacity of 100 events)
+    let user_events_broadcaster = SseBroadcaster::<dto::UserEvent>::new(100);
+
+    // Create method router with extended timeout for SSE (1 hour)
+    let sse_method_router =
+        get(handlers::user_events_stream).layer(TimeoutLayer::new(Duration::from_secs(60 * 60)));
+
+    router =
+        OperationBuilder::<modkit::api::Missing, modkit::api::Missing, ()>::get("/users/events")
+            .operation_id("users_info.user_events_stream")
+            .summary("User events stream")
+            .description("Real-time server-sent events for user create/update/delete operations")
+            .tag("users")
+            .method_router(sse_method_router)
+            .sse_json::<dto::UserEvent>(openapi, "Stream of user events")
+            .register(router, openapi);
+
     router = router.layer(Extension(service.clone()));
+    router = router.layer(Extension(user_events_broadcaster));
 
     Ok(router)
 }

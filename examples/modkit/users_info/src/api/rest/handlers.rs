@@ -7,10 +7,12 @@ use axum::{
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::api::rest::dto::{CreateUserReq, ListUsersQuery, UpdateUserReq, UserDto, UserListDto};
+use crate::api::rest::dto::{
+    CreateUserReq, ListUsersQuery, UpdateUserReq, UserDto, UserEvent, UserListDto,
+};
 use crate::api::rest::error::map_domain_error;
 use crate::domain::service::Service;
-use modkit::api::problem::ProblemResponse;
+use modkit::{api::problem::ProblemResponse, SseBroadcaster};
 
 /// List users with optional pagination
 pub async fn list_users(
@@ -109,4 +111,15 @@ pub async fn delete_user(
             Err(map_domain_error(&e, uri.path()))
         }
     }
+}
+
+/// SSE endpoint for real-time user events
+/// This demonstrates how to create an SSE endpoint with extended timeout
+pub async fn user_events_stream(
+    Extension(broadcaster): Extension<SseBroadcaster<UserEvent>>,
+) -> axum::response::sse::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    info!("New SSE connection for user events");
+    broadcaster.sse_response()
 }

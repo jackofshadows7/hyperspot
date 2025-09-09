@@ -54,6 +54,7 @@ pub mod http;
 pub use api::problem::{
     bad_request, conflict, internal_error, not_found, Problem, ProblemResponse, ValidationError,
 };
+pub use http::sse::SseBroadcaster;
 
 pub mod lifecycle;
 pub mod runtime;

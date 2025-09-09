@@ -44,6 +44,7 @@ rust-embed = "8"
 
 [dev-dependencies]
 async-trait = { workspace = true }
+futures = "0.3"
 
 [features]
 grpc = ["tonic"]

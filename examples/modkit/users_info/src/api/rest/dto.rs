@@ -76,3 +76,15 @@ impl From<UpdateUserReq> for UserPatch {
         }
     }
 }
+
+/// Server-sent event for user updates
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[schema(title = "UserEvent", description = "Real-time user update event")]
+pub struct UserEvent {
+    /// Event type (created, updated, deleted)
+    pub event_type: String,
+    /// User data (None for delete events)
+    pub user: Option<UserDto>,
+    /// Timestamp of the event
+    pub timestamp: String,
+}
