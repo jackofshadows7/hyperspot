@@ -16,7 +16,7 @@ pub fn from_parts(
 
     // Add request ID from current tracing span if available
     let problem = if let Some(id) = tracing::Span::current().id() {
-        problem.with_request_id(id.into_u64().to_string())
+        problem.with_trace_id(id.into_u64().to_string())
     } else {
         problem
     };

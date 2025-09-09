@@ -54,7 +54,7 @@ use model::ComponentsRegistry;
 /// typed operation specs to emit a single OpenAPI document.
 #[modkit::module(
     name = "api_ingress",
-    caps = [rest_host, rest, stateful],
+    capabilities = [rest_host, rest, stateful],
     lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
 pub struct ApiIngress {

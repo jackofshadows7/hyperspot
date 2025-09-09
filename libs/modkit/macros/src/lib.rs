@@ -200,11 +200,11 @@ impl Parse for ModuleConfig {
                         }
                     }
                 }
-                Meta::NameValue(nv) if nv.path.is_ident("caps") => {
+                Meta::NameValue(nv) if nv.path.is_ident("capabilities") => {
                     if seen_caps {
                         return Err(syn::Error::new_spanned(
                             nv.path,
-                            "duplicate `caps` parameter",
+                            "duplicate `capabilities` parameter",
                         ));
                     }
                     seen_caps = true;
@@ -240,7 +240,7 @@ impl Parse for ModuleConfig {
                         other => {
                             return Err(syn::Error::new_spanned(
                                 other,
-                                "caps must be an array, e.g. caps = [db, rest]",
+                                "capabilities must be an array, e.g. capabilities = [db, rest]",
                             ));
                         }
                     }

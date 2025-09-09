@@ -1,16 +1,18 @@
+use std::sync::Arc;
+
 use chrono::Utc;
-use sea_orm::DatabaseConnection;
 use tracing::{debug, info, instrument};
 use uuid::Uuid;
 
 use crate::contract::model::{NewUser, User, UserPatch};
 use crate::domain::error::DomainError;
-use crate::infra::storage::entity;
+use crate::domain::repo::UsersRepository;
 
-/// Domain service containing business logic for user management
+/// Domain service with business rules for user management.
+/// Depends only on the repository port, not on infra types.
 #[derive(Clone)]
 pub struct Service {
-    db: DatabaseConnection,
+    repo: Arc<dyn UsersRepository>,
     config: ServiceConfig,
 }
 
@@ -33,20 +35,20 @@ impl Default for ServiceConfig {
 }
 
 impl Service {
-    pub fn new(db: DatabaseConnection, config: ServiceConfig) -> Self {
-        Self { db, config }
+    /// Create a service with production defaults (real time & UUID).
+    pub fn new(repo: Arc<dyn UsersRepository>, config: ServiceConfig) -> Self {
+        Self { repo, config }
     }
 
     #[instrument(skip(self), fields(user_id = %id))]
     pub async fn get_user(&self, id: Uuid) -> Result<User, DomainError> {
         debug!("Getting user by id");
-
-        let entity = entity::find_by_id(&self.db, id)
+        let user = self
+            .repo
+            .find_by_id(id)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?
             .ok_or_else(|| DomainError::user_not_found(id))?;
-
-        let user: User = entity.into();
         debug!("Successfully retrieved user");
         Ok(user)
     }
@@ -62,14 +64,12 @@ impl Service {
             .min(self.config.max_page_size);
         let offset = offset.unwrap_or(0);
 
-        debug!("Listing users with limit={}, offset={}", limit, offset);
-
-        let entities = entity::find_paginated(&self.db, limit, offset)
+        debug!("Listing users with limit={limit}, offset={offset}");
+        let users = self
+            .repo
+            .list_paginated(limit, offset)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
-
-        let users: Vec<User> = entities.into_iter().map(Into::into).collect();
-
         debug!("Successfully listed {} users", users.len());
         Ok(users)
     }
@@ -81,8 +81,10 @@ impl Service {
         // Validate input
         self.validate_new_user(&new_user)?;
 
-        // Check for email uniqueness
-        if entity::email_exists(&self.db, &new_user.email)
+        // Check uniqueness
+        if self
+            .repo
+            .email_exists(&new_user.email)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?
         {
@@ -91,8 +93,7 @@ impl Service {
 
         let now = Utc::now();
         let id = Uuid::new_v4();
-
-        let entity_model = entity::NewUserEntity {
+        let user = User {
             id,
             email: new_user.email,
             display_name: new_user.display_name,
@@ -100,11 +101,11 @@ impl Service {
             updated_at: now,
         };
 
-        let created_entity = entity::create(&self.db, entity_model)
+        self.repo
+            .insert(user.clone())
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
-        let user: User = created_entity.into();
         info!("Successfully created user with id={}", user.id);
         Ok(user)
     }
@@ -116,16 +117,20 @@ impl Service {
         // Validate patch
         self.validate_user_patch(&patch)?;
 
-        // Check if user exists
-        let existing = entity::find_by_id(&self.db, id)
+        // Load current
+        let mut current = self
+            .repo
+            .find_by_id(id)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?
             .ok_or_else(|| DomainError::user_not_found(id))?;
 
-        // Check email uniqueness if email is being changed
+        // Uniqueness for email change
         if let Some(ref new_email) = patch.email {
-            if new_email != &existing.email
-                && entity::email_exists(&self.db, new_email)
+            if new_email != &current.email
+                && self
+                    .repo
+                    .email_exists(new_email)
                     .await
                     .map_err(|e| DomainError::database(e.to_string()))?
             {
@@ -133,26 +138,32 @@ impl Service {
             }
         }
 
-        let update_data = entity::UpdateUserEntity {
-            email: patch.email,
-            display_name: patch.display_name,
-            updated_at: Some(Utc::now()),
-        };
+        // Apply patch
+        if let Some(email) = patch.email {
+            current.email = email;
+        }
+        if let Some(display_name) = patch.display_name {
+            current.display_name = display_name;
+        }
+        current.updated_at = Utc::now();
 
-        let updated_entity = entity::update(&self.db, id, update_data)
+        // Persist
+        self.repo
+            .update(current.clone())
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
-        let user: User = updated_entity.into();
         info!("Successfully updated user");
-        Ok(user)
+        Ok(current)
     }
 
     #[instrument(skip(self), fields(user_id = %id))]
     pub async fn delete_user(&self, id: Uuid) -> Result<(), DomainError> {
         info!("Deleting user");
 
-        let deleted = entity::delete(&self.db, id)
+        let deleted = self
+            .repo
+            .delete(id)
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
@@ -164,14 +175,14 @@ impl Service {
         Ok(())
     }
 
-    /// Validate new user data
+    // --- validation helpers ---
+
     fn validate_new_user(&self, new_user: &NewUser) -> Result<(), DomainError> {
         self.validate_email(&new_user.email)?;
         self.validate_display_name(&new_user.display_name)?;
         Ok(())
     }
 
-    /// Validate user patch data
     fn validate_user_patch(&self, patch: &UserPatch) -> Result<(), DomainError> {
         if let Some(ref email) = patch.email {
             self.validate_email(email)?;
@@ -182,7 +193,6 @@ impl Service {
         Ok(())
     }
 
-    /// Validate email format
     fn validate_email(&self, email: &str) -> Result<(), DomainError> {
         if email.is_empty() || !email.contains('@') || !email.contains('.') {
             return Err(DomainError::invalid_email(email.to_string()));
@@ -190,7 +200,6 @@ impl Service {
         Ok(())
     }
 
-    /// Validate display name
     fn validate_display_name(&self, display_name: &str) -> Result<(), DomainError> {
         if display_name.trim().is_empty() {
             return Err(DomainError::empty_display_name());

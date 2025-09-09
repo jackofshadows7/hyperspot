@@ -416,7 +416,7 @@ The system uses lock-free patterns for hot paths:
 #[modkit::module(
     name = "my_module",
     deps = ["db"],
-    caps = [db, rest, stateful],
+    capabilities = [db, rest, stateful],
     client = "MyModuleApi"
 )]
 #[derive(Clone, Default)]

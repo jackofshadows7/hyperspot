@@ -138,7 +138,7 @@ pub struct MyResource {
 #[modkit::module(
     name = "my_module",
     deps = [],
-    caps = [rest]
+    capabilities = [rest]
 )]
 #[derive(Clone, Default)]
 pub struct MyModule;

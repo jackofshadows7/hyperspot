@@ -2,7 +2,7 @@ use modkit_macros::module;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
-#[module(name="x", caps=[stateful], lifecycle(entry="serve", await_ready))]
+#[module(name="x", capabilities=[stateful], lifecycle(entry="serve", await_ready))]
 pub struct X;
 
 impl X {

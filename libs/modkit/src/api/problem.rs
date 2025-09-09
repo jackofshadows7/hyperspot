@@ -29,8 +29,9 @@ pub struct Problem {
     pub instance: String,
     /// Optional machine-readable error code defined by the application.
     pub code: String,
-    /// Optional request id useful for tracing.
-    pub request_id: Option<String>,
+    /// Optional trace id useful for tracing.
+    #[serde(rename = "traceId")]
+    pub trace_id: Option<String>,
     /// Optional validation errors for 4xx problems.
     pub errors: Option<Vec<ValidationError>>,
 }
@@ -52,7 +53,7 @@ impl Problem {
             detail: detail.into(),
             instance: String::new(),
             code: String::new(),
-            request_id: None,
+            trace_id: None,
             errors: None,
         }
     }
@@ -72,8 +73,8 @@ impl Problem {
         self
     }
 
-    pub fn with_request_id(mut self, id: impl Into<String>) -> Self {
-        self.request_id = Some(id.into());
+    pub fn with_trace_id(mut self, id: impl Into<String>) -> Self {
+        self.trace_id = Some(id.into());
         self
     }
 
@@ -156,7 +157,7 @@ mod tests {
         )
         .with_code("VALIDATION_ERROR")
         .with_instance("/users/123")
-        .with_request_id("req-456")
+        .with_trace_id("req-456")
         .with_errors(vec![ValidationError {
             detail: "Email is required".to_string(),
             pointer: "/email".to_string(),
@@ -165,7 +166,7 @@ mod tests {
         assert_eq!(p.status, 422);
         assert_eq!(p.code, "VALIDATION_ERROR");
         assert_eq!(p.instance, "/users/123");
-        assert_eq!(p.request_id, Some("req-456".to_string()));
+        assert_eq!(p.trace_id, Some("req-456".to_string()));
         assert!(p.errors.is_some());
         assert_eq!(p.errors.as_ref().unwrap().len(), 1);
     }

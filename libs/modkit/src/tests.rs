@@ -13,6 +13,7 @@ mod module_tests {
     // Minimal OpenAPI mock for REST phase
     struct MockOpenApi;
     impl OpenApiRegistry for MockOpenApi {
+        fn register_operation(&self, _op: &crate::api::OperationSpec) {}
         fn ensure_schema_raw(
             &self,
             name: &str,
@@ -23,7 +24,6 @@ mod module_tests {
         ) -> String {
             name.to_string()
         }
-        fn register_operation(&self, _op: &crate::api::OperationSpec) {}
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }

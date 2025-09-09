@@ -1,6 +1,6 @@
 use modkit_macros::module;
 
-#[module(caps=[stateful])]
+#[module(capabilities=[stateful])]
 pub struct X;
 
 fn main() {}

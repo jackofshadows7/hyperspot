@@ -1,7 +1,7 @@
 error: name parameter is required, e.g. #[module(name = "my-module", ...)]
  --> tests/ui/fail/missing_name.rs:3:1
   |
-3 | #[module(caps=[stateful])]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+3 | #[module(capabilities=[stateful])]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
   = note: this error originates in the attribute macro `module` (in Nightly builds, run with -Z macro-backtrace for more info)

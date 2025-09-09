@@ -70,7 +70,7 @@ impl UserApi for LocalUserClient {
 
 // --- Module ---
 
-#[modkit::module(name = "user_example", caps = [rest])]
+#[modkit::module(name = "user_example", capabilities = [rest])]
 #[derive(Default)]
 pub struct UserModule;
 

@@ -289,7 +289,7 @@ let hub = &ctx.client_hub; /* resolve published clients as your app defines */
 #[modkit::module(
     name = "api_ingress",
     deps = [],                         // ingress depends on nothing by default
-    caps = [rest_host, rest, stateful],// hosts HTTP, has its own REST, runs server
+    capabilities = [rest_host, rest, stateful],// hosts HTTP, has its own REST, runs server
     lifecycle(entry = "serve",         // async entry method
               stop_timeout = "30s",    // graceful stop deadline
               await_ready)             // Running only after `ready.notify()`
