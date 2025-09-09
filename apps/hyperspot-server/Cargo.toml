@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+users-info-example = ["dep:users_info"]
+
 [[bin]]
 name = "hyperspot-server"
 path = "src/main.rs"
@@ -25,6 +29,9 @@ serde_json = { workspace = true }
 url = "2.5"
 # SQLx for driver registration workaround
 sqlx = { workspace = true, features = ["postgres", "sqlite"] }
+
+# Optional example module
+users_info = { path = "../../examples/modkit/users_info", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

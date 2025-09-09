@@ -27,6 +27,8 @@ use url::Url;
 fn _ensure_modules_linked() {
     // Make sure all modules are linked
     let _ = std::any::type_name::<api_ingress::ApiIngress>();
+    #[cfg(feature = "users-info-example")]
+    let _ = std::any::type_name::<users_info::UsersInfo>();
 }
 
 // Force SQLx driver registration for Any driver (workaround for SQLx 0.8)

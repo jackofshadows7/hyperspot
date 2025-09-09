@@ -11,6 +11,8 @@ use crate::config::UsersInfoConfig;
 use crate::contract::client::UsersInfoApi;
 use crate::domain::service::{Service, ServiceConfig};
 use crate::gateways::local::UsersInfoLocalClient;
+// NEW: repo impl
+use crate::infra::storage::sea_orm_repo::SeaOrmUsersRepository;
 
 /// Main module struct with DDD-light layout and proper ClientHub integration
 #[modkit::module(
@@ -20,6 +22,7 @@ use crate::gateways::local::UsersInfoLocalClient;
 )]
 #[derive(Default)]
 pub struct UsersInfo {
+    // Keep the domain service behind ArcSwap for cheap read-mostly access.
     service: arc_swap::ArcSwapOption<Service>,
 }
 
@@ -39,28 +42,29 @@ impl Module for UsersInfo {
         // Load module configuration
         let cfg: UsersInfoConfig = ctx.module_config();
         debug!(
-            "Loaded users_info config: default_page_size={}",
-            cfg.default_page_size
+            "Loaded users_info config: default_page_size={}, max_page_size={}",
+            cfg.default_page_size, cfg.max_page_size
         );
 
-        // Get database connection
+        // Acquire DB (SeaORM connection handle)
         let db = ctx.db().ok_or_else(|| anyhow::anyhow!("DB required"))?;
-        let db_conn = db.seaorm();
+        let db_conn = db.sea(); // DatabaseConnection (cheap cloneable handle)
 
-        // Create domain service with configuration
+        // Wire repository (infra) to domain service (port)
+        let repo = SeaOrmUsersRepository::new(db_conn);
         let service_config = ServiceConfig {
             max_display_name_length: 100,
             default_page_size: cfg.default_page_size,
             max_page_size: cfg.max_page_size,
         };
+        let service = Service::new(Arc::new(repo), service_config);
 
-        let service = Service::new(db_conn.clone(), service_config);
+        // Store service for REST and local client
         self.service.store(Some(Arc::new(service.clone())));
 
-        // Create and register the local client implementation
+        // Local in-process client implementation published to ClientHub
         let api: Arc<dyn UsersInfoApi> = Arc::new(UsersInfoLocalClient::new(Arc::new(service)));
         expose_users_info_client(ctx, &api)?;
-
         info!("UsersInfo API exposed to ClientHub");
         Ok(())
     }
@@ -74,10 +78,8 @@ impl Module for UsersInfo {
 impl DbModule for UsersInfo {
     async fn migrate(&self, db: &db::DbHandle) -> anyhow::Result<()> {
         info!("Running users_info database migrations");
-
         let conn = db.seaorm();
         crate::infra::storage::migrations::Migrator::up(conn, None).await?;
-
         info!("Users database migrations completed successfully");
         Ok(())
     }
@@ -100,7 +102,6 @@ impl RestfulModule for UsersInfo {
             .clone();
 
         let router = routes::register_routes(router, openapi, service)?;
-
         info!("Users REST routes registered successfully");
         Ok(router)
     }
