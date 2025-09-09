@@ -1,6 +1,7 @@
 use axum::{
     extract::{Path, Query},
     http::{StatusCode, Uri},
+    response::IntoResponse,
     response::Json,
     Extension,
 };
@@ -113,13 +114,10 @@ pub async fn delete_user(
     }
 }
 
-/// SSE endpoint for real-time user events
-/// This demonstrates how to create an SSE endpoint with extended timeout
-pub async fn user_events_stream(
-    Extension(broadcaster): Extension<SseBroadcaster<UserEvent>>,
-) -> axum::response::sse::Sse<
-    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
+/// SSE endpoint returning a live stream of `UserEvent`.
+pub async fn users_events(
+    Extension(sse): Extension<SseBroadcaster<UserEvent>>,
+) -> impl IntoResponse {
     info!("New SSE connection for user events");
-    broadcaster.sse_response()
+    sse.sse_response_named("users_events")
 }

@@ -9,6 +9,7 @@ This guide explains how to build production-grade modules on **ModKit**: how to 
 * **Composable modules** discovered via `inventory`, initialized in dependency order.
 * **Ingress as a module** (e.g., `api_ingress`) that owns the Axum router and OpenAPI document.
 * **Type-safe REST** via an operation builder that prevents half-wired routes at compile time.
+* **Server-Sent Events (SSE)** with type-safe broadcasters and domain event integration.
 * **OpenAPI 3.1** generation using `utoipa` with automatic schema registration for DTOs.
 * **Standardized HTTP errors** with RFC-9457 `Problem` and `ProblemResponse`.
 * **Typed ClientHub** for in-process clients (resolve by interface type + optional scope).
@@ -255,6 +256,9 @@ OperationBuilder::<Missing, Missing, S>::post("/path")
 .problem_response(openapi, 400, "Bad request")
 .problem_response(openapi, 409, "Conflict")
 .problem_response(openapi, 500, "Internal error")
+
+// Server-Sent Events (SSE) responses:
+.sse_json::<T>(openapi, "Real-time event stream")
 ```
 
 **Handler / method router**
@@ -326,6 +330,243 @@ OperationBuilder::post("/users")
     .handler(create_user_handler)
     .register(router, openapi);
 ```
+
+---
+
+## Server-Sent Events (SSE)
+
+ModKit provides built-in support for Server-Sent Events through the `SseBroadcaster<T>` type and `OperationBuilder` integration. This enables real-time streaming of typed events to web clients with proper OpenAPI documentation.
+
+### Core components
+
+* **`SseBroadcaster<T>`** — Type-safe broadcaster built on `tokio::sync::broadcast`
+* **`OperationBuilder::sse_json<T>()`** — Register SSE endpoints with OpenAPI schemas
+* **Domain events** — Transport-agnostic events published by the domain layer
+* **SSE adapters** — Bridge domain events to SSE transport
+
+### Basic SSE broadcaster
+
+```rust
+use modkit::SseBroadcaster;
+use serde::{Serialize, Deserialize};
+use utoipa::ToSchema;
+
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+pub struct UserEvent {
+    pub kind: String,
+    pub id: uuid::Uuid,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+// Create broadcaster with buffer capacity
+let broadcaster = SseBroadcaster::<UserEvent>::new(1024);
+
+// Send events
+broadcaster.send(UserEvent {
+    kind: "created".to_string(),
+    id: uuid::Uuid::new_v4(),
+    at: chrono::Utc::now(),
+});
+
+// Subscribe to stream
+let mut stream = broadcaster.subscribe_stream();
+// Use stream.next().await to receive events
+```
+
+### SSE handler example
+
+```rust
+use axum::{extract::Extension, response::sse::Sse};
+use futures::Stream;
+use std::convert::Infallible;
+
+async fn user_events_handler(
+    Extension(sse): Extension<SseBroadcaster<UserEvent>>,
+) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>> {
+    tracing::info!("New SSE connection for user events");
+    sse.sse_response()  // Returns Sse with keepalive pings
+}
+```
+
+### Register SSE routes
+
+```rust
+use axum::{Extension, Router};
+use tower_http::timeout::TimeoutLayer;
+use std::time::Duration;
+
+fn register_sse_route(
+    router: Router<S>,
+    openapi: &dyn OpenApiRegistry,
+    broadcaster: SseBroadcaster<UserEvent>,
+) -> Router<S> {
+    OperationBuilder::<Missing, Missing, S>::get("/users/events")
+        .operation_id("users.events")
+        .summary("User events stream")
+        .description("Real-time stream of user events via Server-Sent Events")
+        .tag("users")
+        .handler(user_events_handler)
+        .sse_json::<UserEvent>(openapi, "SSE stream of UserEvent")
+        .register(router, openapi)
+        .layer(Extension(broadcaster))
+        .layer(TimeoutLayer::new(Duration::from_secs(3600))) // 1 hour timeout
+}
+```
+
+### Domain-driven SSE architecture
+
+For clean separation of concerns, use domain events with adapter pattern:
+
+**1. Domain events (transport-agnostic)**
+
+```rust
+#[derive(Debug, Clone)]
+pub enum UserDomainEvent {
+    Created { id: Uuid, at: DateTime<Utc> },
+    Updated { id: Uuid, at: DateTime<Utc> },
+    Deleted { id: Uuid, at: DateTime<Utc> },
+}
+```
+
+**2. Domain port (output interface)**
+
+```rust
+pub trait EventPublisher<E>: Send + Sync + 'static {
+    fn publish(&self, event: &E);
+}
+```
+
+**3. Domain service (publishes events)**
+
+```rust
+use std::sync::Arc;
+
+pub struct UserService {
+    repo: Arc<dyn UsersRepository>,
+    events: Arc<dyn EventPublisher<UserDomainEvent>>,
+}
+
+impl UserService {
+    pub async fn create_user(&self, data: NewUser) -> Result<User, DomainError> {
+        let user = self.repo.create(data).await?;
+        
+        // Publish domain event
+        self.events.publish(&UserDomainEvent::Created {
+            id: user.id,
+            at: user.created_at,
+        });
+        
+        Ok(user)
+    }
+}
+```
+
+**4. SSE adapter (implements domain port)**
+
+```rust
+use modkit::SseBroadcaster;
+
+pub struct SseUserEventPublisher {
+    broadcaster: SseBroadcaster<UserEvent>,
+}
+
+impl EventPublisher<UserDomainEvent> for SseUserEventPublisher {
+    fn publish(&self, event: &UserDomainEvent) {
+        let sse_event = UserEvent::from(event);  // Convert domain -> transport
+        self.broadcaster.send(sse_event);
+    }
+}
+
+impl From<&UserDomainEvent> for UserEvent {
+    fn from(e: &UserDomainEvent) -> Self {
+        use UserDomainEvent::*;
+        match e {
+            Created { id, at } => Self { kind: "created".into(), id: *id, at: *at },
+            Updated { id, at } => Self { kind: "updated".into(), id: *id, at: *at },
+            Deleted { id, at } => Self { kind: "deleted".into(), id: *id, at: *at },
+        }
+    }
+}
+```
+
+**5. Module wiring**
+
+```rust
+#[modkit::module(name = "users", capabilities = [db, rest])]
+pub struct UsersModule {
+    service: ArcSwapOption<UserService>,
+    sse_broadcaster: SseBroadcaster<UserEvent>,
+}
+
+impl Module for UsersModule {
+    async fn init(&self, ctx: &ModuleCtx) -> anyhow::Result<()> {
+        let repo = Arc::new(SqlUsersRepository::new(ctx.db.clone()));
+        
+        // Create SSE adapter that implements domain port
+        let event_publisher: Arc<dyn EventPublisher<UserDomainEvent>> =
+            Arc::new(SseUserEventPublisher::new(self.sse_broadcaster.clone()));
+        
+        let service = UserService::new(repo, event_publisher);
+        self.service.store(Some(Arc::new(service)));
+        Ok(())
+    }
+}
+
+impl RestfulModule for UsersModule {
+    fn register_rest(&self, _ctx: &ModuleCtx, router: Router, openapi: &dyn OpenApiRegistry) -> anyhow::Result<Router> {
+        let router = register_crud_routes(router, openapi, self.service.clone())?;
+        let router = register_sse_route(router, openapi, self.sse_broadcaster.clone());
+        Ok(router)
+    }
+}
+```
+
+### SSE response variants
+
+The `SseBroadcaster` provides several response methods:
+
+```rust
+// Basic SSE with keepalive pings
+broadcaster.sse_response()
+
+// SSE with custom HTTP headers
+broadcaster.sse_response_with_headers([
+    (HeaderName::from_static("x-custom"), HeaderValue::from_static("value"))
+])
+
+// Named events (sets event: field in SSE stream)
+broadcaster.sse_response_named("user-events")
+
+// Named events with custom headers
+broadcaster.sse_response_named_with_headers("user-events", headers)
+```
+
+### OpenAPI integration
+
+SSE endpoints are automatically documented as `text/event-stream` responses with proper schema references:
+
+```yaml
+paths:
+  /users/events:
+    get:
+      summary: User events stream
+      responses:
+        '200':
+          description: SSE stream of UserEvent
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/UserEvent'
+```
+
+### Best practices
+
+* Use **bounded channels** (e.g., 1024 capacity) to prevent memory leaks from slow clients
+* Apply **timeout middleware** for long-lived SSE connections (e.g., 1-hour timeout)
+* Keep **domain events transport-agnostic** - use adapter pattern for SSE integration
+* **Inject broadcasters per-route** via `Extension` rather than global state
+* Use **structured event types** with `kind` field for client-side filtering
+* Include **timestamps** for event ordering and debugging
 
 ---
 
@@ -498,7 +739,8 @@ pub trait StatefulModule: Send + Sync {
 ## Best practices
 
 * Handlers are thin; domain services are cohesive and testable.
-* Keep DTO mapping in `api/rest/dto.rs`; don’t leak HTTP types into domain.
+* Keep DTO mapping in `api/rest/dto.rs`; don't leak HTTP types into domain.
 * Prefer `ArcSwap`/lock-free caches for read-mostly state.
 * Use `tracing` with module/operation fields.
 * Keep migrations in `infra/storage/migrations/` and run them in `DbModule::migrate`.
+* For SSE: use bounded channels, domain events with adapters, and per-route injection.

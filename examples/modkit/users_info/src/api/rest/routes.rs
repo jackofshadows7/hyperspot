@@ -1,6 +1,5 @@
-use axum::{routing::get, Extension, Router};
+use axum::{Extension, Router};
 use modkit::api::{OpenApiRegistry, OperationBuilder};
-use modkit::SseBroadcaster;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
@@ -86,26 +85,209 @@ pub fn register_routes(
             .problem_response(openapi, 500, "Internal Server Error")
             .register(router, openapi);
 
-    // SSE /users/events - Real-time user events stream with extended timeout
-    // Create a broadcaster for user events (capacity of 100 events)
-    let user_events_broadcaster = SseBroadcaster::<dto::UserEvent>::new(100);
-
-    // Create method router with extended timeout for SSE (1 hour)
-    let sse_method_router =
-        get(handlers::user_events_stream).layer(TimeoutLayer::new(Duration::from_secs(60 * 60)));
-
-    router =
-        OperationBuilder::<modkit::api::Missing, modkit::api::Missing, ()>::get("/users/events")
-            .operation_id("users_info.user_events_stream")
-            .summary("User events stream")
-            .description("Real-time server-sent events for user create/update/delete operations")
-            .tag("users")
-            .method_router(sse_method_router)
-            .sse_json::<dto::UserEvent>(openapi, "Stream of user events")
-            .register(router, openapi);
-
     router = router.layer(Extension(service.clone()));
-    router = router.layer(Extension(user_events_broadcaster));
 
     Ok(router)
+}
+
+/// Register SSE route for user events. The broadcaster is injected per-route via `Extension`.
+pub fn register_users_sse_route<S>(
+    router: axum::Router<S>,
+    openapi: &dyn modkit::api::OpenApiRegistry,
+    sse: modkit::SseBroadcaster<dto::UserEvent>,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    // First register the route, then add layers
+    let router =
+        OperationBuilder::<modkit::api::Missing, modkit::api::Missing, S>::get("/users/events")
+            .operation_id("users_info.events")
+            .summary("User events stream (SSE)")
+            .description("Real-time stream of user events as Server-Sent Events")
+            .tag("users")
+            .handler(handlers::users_events)
+            .sse_json::<dto::UserEvent>(openapi, "SSE stream of UserEvent")
+            .register(router, openapi);
+
+    // Apply layers to the specific route using Router::layer
+    router
+        .layer(axum::Extension(sse))
+        .layer(TimeoutLayer::new(Duration::from_secs(60 * 60)))
+}
+
+#[cfg(test)]
+mod sse_tests {
+    use super::*;
+    use crate::api::rest::sse_adapter::SseUserEventPublisher;
+    use crate::domain::events::UserDomainEvent;
+    use crate::domain::ports::EventPublisher;
+    use chrono::Utc;
+    use futures::StreamExt;
+    use modkit::SseBroadcaster;
+    use tokio::time::{timeout, Duration};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn openapi_has_users_sse_content() {
+        // Create a mock OpenAPI registry (using api_ingress)
+        let api = api_ingress::ApiIngress::default();
+        let router: axum::Router<()> = axum::Router::new();
+        let sse_broadcaster = SseBroadcaster::<dto::UserEvent>::new(4);
+
+        let _router = register_users_sse_route(router, &api, sse_broadcaster);
+
+        let doc = api.build_openapi().expect("openapi");
+        let v = serde_json::to_value(&doc).expect("json");
+
+        // UserEvent schema is materialized
+        let schema = v
+            .pointer("/components/schemas/UserEvent")
+            .expect("UserEvent missing");
+        assert!(schema.get("$ref").is_none());
+
+        // content is text/event-stream with $ref to our schema
+        let refp = v
+            .pointer(
+                "/paths/~1users~1events/get/responses/200/content/text~1event-stream/schema/$ref",
+            )
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
+        assert_eq!(refp, "#/components/schemas/UserEvent");
+    }
+
+    #[tokio::test]
+    async fn sse_broadcaster_delivers_events() {
+        let broadcaster = SseBroadcaster::<dto::UserEvent>::new(10);
+        let mut stream = Box::pin(broadcaster.subscribe_stream());
+
+        let test_event = dto::UserEvent {
+            kind: "created".to_string(),
+            id: Uuid::new_v4(),
+            at: Utc::now(),
+        };
+
+        // Send event
+        broadcaster.send(test_event.clone());
+
+        // Receive event
+        let received = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+
+        assert_eq!(received.kind, test_event.kind);
+        assert_eq!(received.id, test_event.id);
+        assert_eq!(received.at, test_event.at);
+    }
+
+    #[tokio::test]
+    async fn sse_adapter_publishes_domain_events() {
+        let broadcaster = SseBroadcaster::<dto::UserEvent>::new(10);
+        let adapter = SseUserEventPublisher::new(broadcaster.clone());
+        let mut stream = Box::pin(broadcaster.subscribe_stream());
+
+        let user_id = Uuid::new_v4();
+        let timestamp = Utc::now();
+        let domain_event = UserDomainEvent::Created {
+            id: user_id,
+            at: timestamp,
+        };
+
+        // Publish domain event through adapter
+        adapter.publish(&domain_event);
+
+        // Receive converted event
+        let received = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+
+        assert_eq!(received.kind, "created");
+        assert_eq!(received.id, user_id);
+        assert_eq!(received.at, timestamp);
+    }
+
+    #[tokio::test]
+    async fn sse_adapter_handles_all_event_types() {
+        let broadcaster = SseBroadcaster::<dto::UserEvent>::new(10);
+        let adapter = SseUserEventPublisher::new(broadcaster.clone());
+        let mut stream = Box::pin(broadcaster.subscribe_stream());
+
+        let user_id = Uuid::new_v4();
+        let timestamp = Utc::now();
+
+        // Test Created event
+        adapter.publish(&UserDomainEvent::Created {
+            id: user_id,
+            at: timestamp,
+        });
+        let event = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+        assert_eq!(event.kind, "created");
+
+        // Test Updated event
+        adapter.publish(&UserDomainEvent::Updated {
+            id: user_id,
+            at: timestamp,
+        });
+        let event = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+        assert_eq!(event.kind, "updated");
+
+        // Test Deleted event
+        adapter.publish(&UserDomainEvent::Deleted {
+            id: user_id,
+            at: timestamp,
+        });
+        let event = timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+        assert_eq!(event.kind, "deleted");
+    }
+
+    #[tokio::test]
+    async fn sse_broadcaster_handles_multiple_subscribers() {
+        let broadcaster = SseBroadcaster::<dto::UserEvent>::new(10);
+        let mut stream1 = Box::pin(broadcaster.subscribe_stream());
+        let mut stream2 = Box::pin(broadcaster.subscribe_stream());
+
+        let test_event = dto::UserEvent {
+            kind: "created".to_string(),
+            id: Uuid::new_v4(),
+            at: Utc::now(),
+        };
+
+        // Send event
+        broadcaster.send(test_event.clone());
+
+        // Both subscribers should receive the event
+        let received1 = timeout(Duration::from_millis(100), stream1.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+        let received2 = timeout(Duration::from_millis(100), stream2.next())
+            .await
+            .expect("timeout")
+            .expect("event received");
+
+        assert_eq!(received1.kind, test_event.kind);
+        assert_eq!(received2.kind, test_event.kind);
+        assert_eq!(received1.id, received2.id);
+    }
+
+    #[tokio::test]
+    async fn sse_response_stream_works() {
+        let broadcaster = SseBroadcaster::<dto::UserEvent>::new(10);
+        let sse_response = broadcaster.sse_response();
+
+        // The response should be created successfully
+        // This test mainly ensures the type system works correctly
+        drop(sse_response);
+    }
 }

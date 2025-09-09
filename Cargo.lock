@@ -3916,6 +3916,7 @@ name = "users_info"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "api_ingress",
  "arc-swap",
  "async-trait",
  "axum 0.8.4",
