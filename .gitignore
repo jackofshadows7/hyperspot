@@ -25,3 +25,5 @@ logs
 
 # Ignore stray local clone of the old top-level hapig repo (submodule lives under guidelines/)
 /hapig/
+
+.cargo/advisory-db

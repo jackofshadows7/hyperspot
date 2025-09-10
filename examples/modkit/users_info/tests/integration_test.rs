@@ -15,15 +15,21 @@ use axum::{
     Router,
 };
 use chrono::Utc;
+use modkit::SseBroadcaster;
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use users_info::{
-    api::rest::dto::{CreateUserReq, UserDto},
+    api::rest::dto::{CreateUserReq, UserDto, UserEvent},
+    api::rest::sse_adapter::SseUserEventPublisher,
     contract::client::UsersInfoApi,
-    domain::service::{Service, ServiceConfig},
+    domain::{
+        events::UserDomainEvent,
+        ports::EventPublisher,
+        service::{Service, ServiceConfig},
+    },
     gateways::local::UsersInfoLocalClient,
     infra::storage::{
         migrations::Migrator,
@@ -46,14 +52,24 @@ async fn create_test_db() -> DatabaseConnection {
 async fn create_test_service() -> Arc<Service> {
     let db = create_test_db().await;
     let repo = SeaOrmUsersRepository::new(db);
+    let events: Arc<dyn EventPublisher<UserDomainEvent>> = Arc::new(MockEventPublisher);
     let config = ServiceConfig::default();
-    Arc::new(Service::new(Arc::new(repo), config))
+    Arc::new(Service::new(Arc::new(repo), events, config))
 }
 
 /// Build a local in-process client on top of the Service.
 async fn create_test_client() -> Arc<dyn UsersInfoApi> {
     let service = create_test_service().await;
     Arc::new(UsersInfoLocalClient::new(service))
+}
+
+/// Mock event publisher for tests - just ignores events
+struct MockEventPublisher;
+
+impl EventPublisher<UserDomainEvent> for MockEventPublisher {
+    fn publish(&self, _event: &UserDomainEvent) {
+        // no-op in tests
+    }
 }
 
 /// Minimal OpenAPI registry stub for tests.
@@ -360,4 +376,172 @@ async fn test_contract_model_has_no_serde() {
     let dto = users_info::api::rest::dto::UserDto::from(user);
     let serialized = serde_json::to_string(&dto);
     assert!(serialized.is_ok());
+}
+
+#[tokio::test]
+async fn test_end_to_end_sse_events() -> Result<()> {
+    use futures::StreamExt;
+    use tokio::time::{timeout, Duration};
+
+    // Create SSE broadcaster and adapter
+    let sse_broadcaster = SseBroadcaster::<UserEvent>::new(10);
+    let event_publisher: Arc<dyn EventPublisher<UserDomainEvent>> =
+        Arc::new(SseUserEventPublisher::new(sse_broadcaster.clone()));
+
+    // Create service with SSE event publisher
+    let db = create_test_db().await;
+    let repo = SeaOrmUsersRepository::new(db);
+    let config = ServiceConfig::default();
+    let service = Arc::new(Service::new(Arc::new(repo), event_publisher, config));
+
+    // Subscribe to SSE stream
+    let mut event_stream = Box::pin(sse_broadcaster.subscribe_stream());
+
+    // Create a user - should trigger Created event
+    let new_user = users_info::contract::model::NewUser {
+        email: "sse-test@example.com".to_string(),
+        display_name: "SSE Test User".to_string(),
+    };
+    let created_user = service.create_user(new_user).await?;
+
+    // Wait for Created event
+    let created_event = timeout(Duration::from_millis(200), event_stream.next())
+        .await
+        .expect("timeout waiting for created event")
+        .expect("should receive created event");
+
+    assert_eq!(created_event.kind, "created");
+    assert_eq!(created_event.id, created_user.id);
+
+    // Update the user - should trigger Updated event
+    let patch = users_info::contract::model::UserPatch {
+        email: None,
+        display_name: Some("Updated SSE User".to_string()),
+    };
+    let updated_user = service.update_user(created_user.id, patch).await?;
+
+    // Wait for Updated event
+    let updated_event = timeout(Duration::from_millis(200), event_stream.next())
+        .await
+        .expect("timeout waiting for updated event")
+        .expect("should receive updated event");
+
+    assert_eq!(updated_event.kind, "updated");
+    assert_eq!(updated_event.id, updated_user.id);
+
+    // Delete the user - should trigger Deleted event
+    service.delete_user(created_user.id).await?;
+
+    // Wait for Deleted event
+    let deleted_event = timeout(Duration::from_millis(200), event_stream.next())
+        .await
+        .expect("timeout waiting for deleted event")
+        .expect("should receive deleted event");
+
+    assert_eq!(deleted_event.kind, "deleted");
+    assert_eq!(deleted_event.id, created_user.id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sse_adapter_integration() -> Result<()> {
+    use futures::StreamExt;
+    use tokio::time::{timeout, Duration};
+
+    // Test the SSE adapter in isolation
+    let sse_broadcaster = SseBroadcaster::<UserEvent>::new(10);
+    let adapter = SseUserEventPublisher::new(sse_broadcaster.clone());
+    let mut event_stream = Box::pin(sse_broadcaster.subscribe_stream());
+
+    let test_user_id = Uuid::new_v4();
+    let test_timestamp = Utc::now();
+
+    // Test all domain event types
+    let domain_events = vec![
+        UserDomainEvent::Created {
+            id: test_user_id,
+            at: test_timestamp,
+        },
+        UserDomainEvent::Updated {
+            id: test_user_id,
+            at: test_timestamp,
+        },
+        UserDomainEvent::Deleted {
+            id: test_user_id,
+            at: test_timestamp,
+        },
+    ];
+
+    let expected_kinds = ["created", "updated", "deleted"];
+
+    // Publish all events
+    for event in &domain_events {
+        adapter.publish(event);
+    }
+
+    // Verify all events are received in order
+    for expected_kind in &expected_kinds {
+        let received_event = timeout(Duration::from_millis(200), event_stream.next())
+            .await
+            .expect("timeout waiting for event")
+            .expect("should receive event");
+
+        assert_eq!(received_event.kind, *expected_kind);
+        assert_eq!(received_event.id, test_user_id);
+        assert_eq!(received_event.at, test_timestamp);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multiple_sse_subscribers() -> Result<()> {
+    use futures::StreamExt;
+    use tokio::time::{timeout, Duration};
+
+    // Create broadcaster with multiple subscribers
+    let sse_broadcaster = SseBroadcaster::<UserEvent>::new(10);
+    let adapter = SseUserEventPublisher::new(sse_broadcaster.clone());
+
+    // Create multiple subscribers
+    let mut stream1 = Box::pin(sse_broadcaster.subscribe_stream());
+    let mut stream2 = Box::pin(sse_broadcaster.subscribe_stream());
+    let mut stream3 = Box::pin(sse_broadcaster.subscribe_stream());
+
+    let test_user_id = Uuid::new_v4();
+    let test_timestamp = Utc::now();
+
+    // Publish a single event
+    adapter.publish(&UserDomainEvent::Created {
+        id: test_user_id,
+        at: test_timestamp,
+    });
+
+    // All subscribers should receive the same event
+    let event1 = timeout(Duration::from_millis(200), stream1.next())
+        .await
+        .expect("timeout waiting for event")
+        .expect("should receive event");
+
+    let event2 = timeout(Duration::from_millis(200), stream2.next())
+        .await
+        .expect("timeout waiting for event")
+        .expect("should receive event");
+
+    let event3 = timeout(Duration::from_millis(200), stream3.next())
+        .await
+        .expect("timeout waiting for event")
+        .expect("should receive event");
+
+    // Verify all received the same event
+    assert_eq!(event1.kind, "created");
+    assert_eq!(event2.kind, "created");
+    assert_eq!(event3.kind, "created");
+    assert_eq!(event1.id, event2.id);
+    assert_eq!(event2.id, event3.id);
+    assert_eq!(event1.at, event2.at);
+    assert_eq!(event2.at, event3.at);
+
+    Ok(())
 }

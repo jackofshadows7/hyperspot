@@ -1,4 +1,5 @@
 pub mod dto;
 pub mod error;
-mod handlers;
+pub mod handlers;
 pub mod routes;
+pub mod sse_adapter;

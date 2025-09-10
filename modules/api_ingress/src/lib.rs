@@ -252,7 +252,8 @@ impl ApiIngress {
             let mut responses = ResponsesBuilder::new();
             for r in &spec.responses {
                 let is_json_like = r.content_type == "application/json"
-                    || r.content_type == problem::APPLICATION_PROBLEM_JSON;
+                    || r.content_type == problem::APPLICATION_PROBLEM_JSON
+                    || r.content_type == "text/event-stream";
                 let resp = if is_json_like {
                     if let Some(name) = &r.schema_name {
                         // Manually build content to preserve the correct content type
@@ -658,5 +659,92 @@ mod problem_openapi_tests {
             .and_then(|r| r.as_str())
             .unwrap_or("");
         assert_eq!(schema_ref, "#/components/schemas/Problem");
+    }
+}
+
+#[cfg(test)]
+mod sse_openapi_tests {
+    use super::*;
+    use axum::Json;
+    use modkit::api::{Missing, OperationBuilder};
+    use serde_json::Value;
+
+    #[derive(Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+    struct UserEvent {
+        id: u32,
+        message: String,
+    }
+
+    async fn sse_handler() -> axum::response::sse::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    > {
+        let b = modkit::SseBroadcaster::<UserEvent>::new(4);
+        b.sse_response()
+    }
+
+    #[tokio::test]
+    async fn openapi_has_sse_content() {
+        let api = ApiIngress::default();
+        let router = axum::Router::new();
+
+        let _router = OperationBuilder::<Missing, Missing, ()>::get("/demo/sse")
+            .summary("Demo SSE")
+            .handler(sse_handler)
+            .sse_json::<UserEvent>(&api, "SSE of UserEvent")
+            .register(router, &api);
+
+        let doc = api.build_openapi().expect("openapi");
+        let v = serde_json::to_value(&doc).expect("json");
+
+        // schema is materialized
+        let schema = v
+            .pointer("/components/schemas/UserEvent")
+            .expect("UserEvent missing");
+        assert!(schema.get("$ref").is_none());
+
+        // content is text/event-stream with $ref to our schema
+        let refp = v
+            .pointer("/paths/~1demo~1sse/get/responses/200/content/text~1event-stream/schema/$ref")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
+        assert_eq!(refp, "#/components/schemas/UserEvent");
+    }
+
+    #[tokio::test]
+    async fn openapi_sse_additional_response() {
+        let api = ApiIngress::default();
+        let router = axum::Router::new();
+
+        async fn mixed_handler() -> Json<Value> {
+            Json(serde_json::json!({"ok": true}))
+        }
+
+        let _router = OperationBuilder::<Missing, Missing, ()>::get("/demo/mixed")
+            .summary("Mixed responses")
+            .handler(mixed_handler)
+            .json_response(200, "Success response")
+            .sse_json::<UserEvent>(&api, "Additional SSE stream")
+            .register(router, &api);
+
+        let doc = api.build_openapi().expect("openapi");
+        let v = serde_json::to_value(&doc).expect("json");
+
+        // Check that both response types are present
+        let responses = v
+            .pointer("/paths/~1demo~1mixed/get/responses")
+            .expect("responses");
+
+        // JSON response exists
+        assert!(responses.get("200").is_some());
+
+        // SSE response exists (could be another 200 or different status)
+        let response_content = responses.get("200").and_then(|r| r.get("content"));
+        assert!(response_content.is_some());
+
+        // UserEvent schema is registered
+        let schema = v
+            .pointer("/components/schemas/UserEvent")
+            .expect("UserEvent missing");
+        assert!(schema.get("$ref").is_none());
     }
 }

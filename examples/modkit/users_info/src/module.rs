@@ -2,13 +2,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use modkit::api::OpenApiRegistry;
-use modkit::{DbModule, Module, ModuleCtx, RestfulModule};
+use modkit::{DbModule, Module, ModuleCtx, RestfulModule, SseBroadcaster};
 use sea_orm_migration::MigratorTrait;
 use tracing::{debug, info};
 
+use crate::api::rest::dto::UserEvent;
 use crate::api::rest::routes;
+use crate::api::rest::sse_adapter::SseUserEventPublisher;
 use crate::config::UsersInfoConfig;
 use crate::contract::client::UsersInfoApi;
+use crate::domain::events::UserDomainEvent;
+use crate::domain::ports::EventPublisher;
 use crate::domain::service::{Service, ServiceConfig};
 use crate::gateways::local::UsersInfoLocalClient;
 // NEW: repo impl
@@ -20,16 +24,27 @@ use crate::infra::storage::sea_orm_repo::SeaOrmUsersRepository;
     capabilities = [db, rest],
     client = crate::contract::client::UsersInfoApi
 )]
-#[derive(Default)]
 pub struct UsersInfo {
     // Keep the domain service behind ArcSwap for cheap read-mostly access.
     service: arc_swap::ArcSwapOption<Service>,
+    // SSE broadcaster for user events
+    sse: SseBroadcaster<UserEvent>,
+}
+
+impl Default for UsersInfo {
+    fn default() -> Self {
+        Self {
+            service: arc_swap::ArcSwapOption::from(None),
+            sse: SseBroadcaster::new(1024),
+        }
+    }
 }
 
 impl Clone for UsersInfo {
     fn clone(&self) -> Self {
         Self {
             service: arc_swap::ArcSwapOption::new(self.service.load().as_ref().map(|s| s.clone())),
+            sse: self.sse.clone(),
         }
     }
 }
@@ -52,12 +67,17 @@ impl Module for UsersInfo {
 
         // Wire repository (infra) to domain service (port)
         let repo = SeaOrmUsersRepository::new(db_conn);
+
+        // Create event publisher adapter that bridges domain events to SSE
+        let publisher: Arc<dyn EventPublisher<UserDomainEvent>> =
+            Arc::new(SseUserEventPublisher::new(self.sse.clone()));
+
         let service_config = ServiceConfig {
             max_display_name_length: 100,
             default_page_size: cfg.default_page_size,
             max_page_size: cfg.max_page_size,
         };
-        let service = Service::new(Arc::new(repo), service_config);
+        let service = Service::new(Arc::new(repo), publisher, service_config);
 
         // Store service for REST and local client
         self.service.store(Some(Arc::new(service.clone())));
@@ -102,6 +122,10 @@ impl RestfulModule for UsersInfo {
             .clone();
 
         let router = routes::register_routes(router, openapi, service)?;
+
+        // Register SSE route with per-route Extension
+        let router = routes::register_users_sse_route(router, openapi, self.sse.clone());
+
         info!("Users REST routes registered successfully");
         Ok(router)
     }

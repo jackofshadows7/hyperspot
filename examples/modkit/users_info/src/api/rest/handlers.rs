@@ -1,16 +1,19 @@
 use axum::{
     extract::{Path, Query},
     http::{StatusCode, Uri},
+    response::IntoResponse,
     response::Json,
     Extension,
 };
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::api::rest::dto::{CreateUserReq, ListUsersQuery, UpdateUserReq, UserDto, UserListDto};
+use crate::api::rest::dto::{
+    CreateUserReq, ListUsersQuery, UpdateUserReq, UserDto, UserEvent, UserListDto,
+};
 use crate::api::rest::error::map_domain_error;
 use crate::domain::service::Service;
-use modkit::api::problem::ProblemResponse;
+use modkit::{api::problem::ProblemResponse, SseBroadcaster};
 
 /// List users with optional pagination
 pub async fn list_users(
@@ -109,4 +112,12 @@ pub async fn delete_user(
             Err(map_domain_error(&e, uri.path()))
         }
     }
+}
+
+/// SSE endpoint returning a live stream of `UserEvent`.
+pub async fn users_events(
+    Extension(sse): Extension<SseBroadcaster<UserEvent>>,
+) -> impl IntoResponse {
+    info!("New SSE connection for user events");
+    sse.sse_response_named("users_events")
 }

@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use crate::contract::model::{NewUser, User, UserPatch};
 use crate::domain::error::DomainError;
+use crate::domain::events::UserDomainEvent;
+use crate::domain::ports::EventPublisher;
 use crate::domain::repo::UsersRepository;
 
 /// Domain service with business rules for user management.
@@ -13,6 +15,7 @@ use crate::domain::repo::UsersRepository;
 #[derive(Clone)]
 pub struct Service {
     repo: Arc<dyn UsersRepository>,
+    events: Arc<dyn EventPublisher<UserDomainEvent>>,
     config: ServiceConfig,
 }
 
@@ -36,8 +39,16 @@ impl Default for ServiceConfig {
 
 impl Service {
     /// Create a service with production defaults (real time & UUID).
-    pub fn new(repo: Arc<dyn UsersRepository>, config: ServiceConfig) -> Self {
-        Self { repo, config }
+    pub fn new(
+        repo: Arc<dyn UsersRepository>,
+        events: Arc<dyn EventPublisher<UserDomainEvent>>,
+        config: ServiceConfig,
+    ) -> Self {
+        Self {
+            repo,
+            events,
+            config,
+        }
     }
 
     #[instrument(skip(self), fields(user_id = %id))]
@@ -106,6 +117,12 @@ impl Service {
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
+        // Publish domain event
+        self.events.publish(&UserDomainEvent::Created {
+            id: user.id,
+            at: user.created_at,
+        });
+
         info!("Successfully created user with id={}", user.id);
         Ok(user)
     }
@@ -153,6 +170,12 @@ impl Service {
             .await
             .map_err(|e| DomainError::database(e.to_string()))?;
 
+        // Publish domain event
+        self.events.publish(&UserDomainEvent::Updated {
+            id: current.id,
+            at: current.updated_at,
+        });
+
         info!("Successfully updated user");
         Ok(current)
     }
@@ -170,6 +193,10 @@ impl Service {
         if !deleted {
             return Err(DomainError::user_not_found(id));
         }
+
+        // Publish domain event
+        self.events
+            .publish(&UserDomainEvent::Deleted { id, at: Utc::now() });
 
         info!("Successfully deleted user");
         Ok(())

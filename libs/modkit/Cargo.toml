@@ -33,6 +33,8 @@ tracing      = { workspace = true }
 
 tokio        = { workspace = true }
 tokio-util   = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures      = "0.3"
 
 # Router/types used in contracts and runtime
 axum         = { workspace = true }
