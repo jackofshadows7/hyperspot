@@ -6,8 +6,7 @@ Thank you for your interest in contributing to HyperSpot Server! This document p
 
 ### Prerequisites
 
-- **Rust 1.75+** with Cargo
-- **PostgreSQL 12+** (optional, mock database available)
+- **Rust stable** with Cargo (Edition 2021)
 - **Git** for version control
 - **Your favorite editor** (VS Code with rust-analyzer recommended)
 
@@ -16,7 +15,7 @@ Thank you for your interest in contributing to HyperSpot Server! This document p
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd lmstudio-rust
+cd hyperspot
 
 # Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -30,26 +29,25 @@ cargo build
 # Run tests
 cargo test
 
-# Start the development server
-cargo run --bin hyperspot-server -- run
+# Start the development server (SQLite quickstart)
+cargo run --bin hyperspot-server -- --config config/quickstart.yaml run
 ```
 
 ### Workspace Layout
 
 ```
-lmstudio-rust/
+hyperspot/
 ├── apps/
 │   └── hyperspot-server/     # Main server binary
 ├── modules/
-│   ├── api_ingress/          # HTTP gateway and OpenAPI
-│   └── sysinfo/              # System information module
-├── modkit/                   # Core framework and traits
-│   ├── macros/               # Procedural macros
-│   └── src/                  # Framework implementation
-├── db/                       # Database abstraction layer
-├── hyperspot_runtime/        # Runtime utilities and config
+│   └── api_ingress/          # HTTP gateway and OpenAPI provider
+
+├── libs/
+│   ├── modkit/               # Core framework and traits
+│   ├── db/                   # Database abstraction layer
+│   └── runtime/              # Runtime utilities and config
 ├── config/                   # Configuration files
-└── docs/                     # Documentation (if present)
+└── docs/                     # Documentation
 ```
 
 ## 📝 Development Workflow
@@ -73,34 +71,80 @@ Follow the coding standards and patterns described below.
 ### 3. Run Quality Checks
 
 ```bash
-# Format code
-cargo fmt
+# Format code (check only)
+make fmt
 
-# Run linter
-cargo clippy -- -D warnings
+# Lint (deny warnings)
+make clippy
 
 # Run tests
-cargo test
+make test
 
-# Check compilation
-cargo check --all-targets
+# Full check (fmt + clippy + test + security)
+make check
+
+# Security checks
+make audit
+make deny
 ```
 
 ### 4. Commit Changes
 
-Use clear, descriptive commit messages:
+Follow a structured commit message format:
 
-```bash
-git add .
-git commit -m "feat: add user authentication module
-
-- Implements JWT-based authentication
-- Adds login/logout endpoints
-- Includes comprehensive tests
-- Updates OpenAPI documentation
-
-Closes #123"
+```text
+<type>(<module>): <description>
 ```
+
+- `<type>`: change category (see table below)
+- `<module>` (optional): the area touched (e.g., api_ingress, modkit, ecommerce)
+- `<description>`: concise, imperative summary
+
+Accepted commit types:
+
+| Type       | Meaning                                                     |
+|------------|-------------------------------------------------------------|
+| feat       | A new feature                                               |
+| fix        | A bug fix                                                   |
+| tech       | A technical improvement                                     |
+| cleanup    | Code cleanup                                                |
+| refactor   | Code restructuring without functional changes               |
+| test       | Adding or modifying tests                                   |
+| docs       | Documentation updates                                       |
+| style      | Code style changes (whitespace, formatting, etc.)           |
+| chore      | Misc tasks (deps, tooling, scripts)                         |
+| perf       | Performance improvements                                    |
+| ci         | CI/CD configuration changes                                 |
+| build      | Build system or dependency changes                          |
+| revert     | Reverting a previous commit                                 |
+| security   | Security fixes                                              |
+| breaking   | Backward incompatible changes                               |
+
+Examples:
+
+```text
+feat(auth): add OAuth2 support for login
+fix(ui): resolve button alignment issue on mobile
+tech(database): add error abstraction for database and API errors
+refactor(database): optimize query execution
+test(api): add unit tests for user authentication
+docs(readme): update installation instructions
+style(css): apply consistent spacing in stylesheet
+```
+
+Best practices:
+
+- Keep the title concise (ideally ≤ 50 chars)
+- Use imperative mood (e.g., "Fix bug", not "Fixed bug")
+- Make commits atomic (one logical change per commit)
+- Add details in the body when necessary (what/why, not how)
+- For breaking changes, either use `feat!:`/`fix!:` or include a `BREAKING CHANGE:` footer
+
+New functionality development:
+
+- Follow the repository structure in `README.md`
+- Prefer soft-deletion for entities; provide hard-deletion with retention routines
+- Include unit tests (and integration tests when relevant)
 
 ### 5. Push and Create PR
 
@@ -128,92 +172,8 @@ Then create a Pull Request on GitHub with:
    ```
 
 2. **Define module structure**:
-   ```rust
-   #[derive(Clone, Default)]
-   #[module(name = "my_module", deps = [], capabilities = [core], client = MyModuleClient)]
-   pub struct MyModule {
-       config: Arc<RwLock<MyModuleConfig>>,
-   }
-   
-   pub trait MyModuleClient: Send + Sync {
-       async fn my_operation(&self) -> Result<String>;
-   }
-   
-   impl MyModuleClient for MyModule {
-       async fn my_operation(&self) -> Result<String> {
-           Ok("Hello from MyModule".to_string())
-       }
-   }
-   ```
 
-3. **Implement required traits**:
-   ```rust
-   #[async_trait]
-   impl Module for MyModule {
-       fn name(&self) -> &str { "my_module" }
-       fn dependencies(&self) -> Vec<&'static str> { vec![] }
-       
-       async fn init_ctx(&self, ctx: &ModuleCtx) -> Result<()> {
-           // Load configuration, initialize resources
-           Ok(())
-       }
-   }
-   ```
-
-#### Module Capabilities
-
-- **Core**: Basic module functionality
-- **Stateful**: Has start/stop lifecycle and status
-- **Restful**: Provides REST API endpoints
-
-```rust
-// Stateful module
-impl StatefulModule for MyModule {
-    async fn start(&self, cancellation_token: tokio_util::sync::CancellationToken) -> Result<()> { 
-        tracing::info!("MyModule starting");
-        // Start background services, use cancellation_token for graceful shutdown
-        Ok(())
-    }
-    
-    async fn stop(&self, cancellation_token: tokio_util::sync::CancellationToken) -> Result<()> { 
-        tracing::info!("MyModule stopping");
-        // Graceful cleanup with timeout
-        Ok(())
-    }
-}
-
-// RESTful module using modern type-safe API
-impl RestfulModule for MyModule {
-    fn register_routes(&self, router: axum::Router<()>, openapi: &mut dyn modkit::api::OpenApiRegistry) -> axum::Router<()> {
-        use modkit::api::OperationBuilder;
-        
-        // Register schemas for OpenAPI documentation
-        openapi.register_schema("MyResponse", schemars::schema_for!(MyResponse));
-        openapi.register_schema("CreateRequest", schemars::schema_for!(CreateRequest));
-        
-        // Register with handler for working endpoints
-        let router = OperationBuilder::get("/my-endpoint")
-            .operation_id("my_module.get")
-            .summary("Get my resource")
-            .description("Detailed description of what this endpoint does")
-            .tag("my_module")
-            .json_response(200, "Success")
-            .handler(axum::routing::get(my_handler))
-            .register(router, openapi);
-            
-        // Create endpoint with type-safe request/response
-        OperationBuilder::post("/my-endpoint")
-            .operation_id("my_module.create")
-            .summary("Create my resource")
-            .description("Create a new resource with the provided data")
-            .tag("my_module")
-            .json_response(201, "Created")
-            .json_response(400, "Invalid input")
-            .handler(axum::routing::post(create_my_resource_handler))
-            .register(router, openapi)
-    }
-}
-```
+TBD
 
 ### API Design Standards
 
@@ -254,85 +214,17 @@ impl RestfulModule for MyModule {
 
 #### Schema Design
 
-```rust
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct User {
-    /// Unique user identifier
-    pub id: u64,
-    
-    /// Full name of the user
-    #[schemars(length(min = 1, max = 100))]
-    pub name: String,
-    
-    /// Email address (must be valid email)
-    #[schemars(format = "email")]
-    pub email: String,
-    
-    /// Account creation timestamp
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    
-    /// Optional user profile data
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<UserProfile>,
-}
-```
+TBD
 
 ## 🧪 Testing Standards
 
 ### Unit Tests
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[tokio::test]
-    async fn test_user_creation() {
-        let user_service = UserService::new();
-        let request = CreateUserRequest {
-            name: "Alice".to_string(),
-            email: "alice@example.com".to_string(),
-        };
-        
-        let user = user_service.create_user(request).await.unwrap();
-        assert_eq!(user.name, "Alice");
-        assert_eq!(user.email, "alice@example.com");
-    }
-    
-    #[test]
-    fn test_config_validation() {
-        let config = MyModuleConfig {
-            timeout: 0, // Invalid
-        };
-        assert!(config.validate().is_err());
-    }
-}
-```
+TBD 
 
 ### Integration Tests
 
-```rust
-#[tokio::test]
-async fn test_api_integration() {
-    let api_ingress = ApiIngress::new(ApiIngressConfig::default());
-    let my_module = MyModule::new();
-    
-    // Register endpoints
-    let router = axum::Router::new();
-    let mut openapi_registry = MockOpenApiRegistry::new();
-    let router = my_module.register_routes(router, &mut openapi_registry);
-    
-    // Test request
-    let request = Request::builder()
-        .uri("/my-endpoint")
-        .body(Body::empty())
-        .unwrap();
-        
-    let response = router.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-}
-```
+TBD
 
 ### Test Coverage
 
@@ -354,14 +246,13 @@ cargo tarpaulin --out html
 Use `rustfmt` with the project configuration:
 
 ```bash
-cargo fmt
+cargo fmt -all
 ```
 
 Key formatting rules:
 - **Line length**: 100 characters max
 - **Indentation**: 4 spaces (no tabs)
 - **Trailing commas**: Required in multi-line expressions
-- **Import organization**: Group by source (std, external, internal)
 
 ### Naming Conventions
 
