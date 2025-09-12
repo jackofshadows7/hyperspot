@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use db::{ConnectOpts, DbHandle};
 use mimalloc::MiMalloc;
-use runtime::{AppConfig, AppConfigProvider, CliArgs, ConfigProvider, DatabaseConfig};
+use runtime::{AppConfig, AppConfigProvider, CliArgs, ConfigProvider};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -16,11 +16,71 @@ impl modkit::ConfigProvider for ModkitConfigAdapter {
     }
 }
 
-use modkit::runtime::{run, DbFactory, DbOptions, RunOptions, ShutdownOptions};
+// Per-module database factory implementation
+fn create_per_module_db_factory(config: Arc<AppConfig>, home_dir: PathBuf) -> PerModuleDbFactory {
+    Box::new(move |module_name: &str| {
+        let config = config.clone();
+        let home_dir = home_dir.clone();
+        let module_name = module_name.to_string();
+
+        Box::pin(async move {
+            match runtime::config::build_final_db_for_module(&config, &module_name, &home_dir)? {
+                Some((final_dsn, pool_cfg)) => {
+                    // Convert from runtime config types to db config types
+                    let connect_opts = db::ConnectOpts {
+                        max_conns: pool_cfg.max_conns,
+                        acquire_timeout: pool_cfg.acquire_timeout,
+                        create_sqlite_dirs: true,
+                        ..Default::default()
+                    };
+
+                    let redacted_dsn = redact_dsn_password(&final_dsn);
+                    tracing::info!(
+                        "Connecting to database for module '{}': {}",
+                        module_name,
+                        redacted_dsn
+                    );
+
+                    let db_handle = db::DbHandle::connect(&final_dsn, connect_opts)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to connect DB for module '{}': {}",
+                                module_name,
+                                e
+                            )
+                        })?;
+
+                    Ok(Some(Arc::new(db_handle)))
+                }
+                None => {
+                    // Module has no database configuration - this is fine
+                    tracing::debug!("Module '{}' has no database configuration", module_name);
+                    Ok(None)
+                }
+            }
+        })
+    })
+}
+
+/// Redact password from DSN for logging
+fn redact_dsn_password(dsn: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(dsn) {
+        if parsed.password().is_some() {
+            let _ = parsed.set_password(Some("***"));
+            parsed.to_string()
+        } else {
+            dsn.to_string()
+        }
+    } else {
+        dsn.to_string()
+    }
+}
+
+use modkit::runtime::{run, DbFactory, DbOptions, PerModuleDbFactory, RunOptions, ShutdownOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use url::Url;
 
 // Ensure modules are linked and registered via inventory
 #[allow(dead_code)]
@@ -40,47 +100,6 @@ fn _ensure_drivers_linked() {
     // Make sure database drivers are linked for sqlx::any
     let _ = std::any::type_name::<Sqlite>();
     let _ = std::any::type_name::<Postgres>();
-}
-
-/// Expand a sqlite DSN into an absolute-path DSN using a base directory.
-/// - Keeps "sqlite::memory:" as-is.
-/// - Normalizes backslashes into forward slashes (important on Windows).
-fn absolutize_sqlite_dsn(dsn: &str, base_dir: &Path, create_dirs: bool) -> Result<String> {
-    if dsn.eq_ignore_ascii_case("sqlite::memory:") || dsn.eq_ignore_ascii_case("sqlite://:memory:")
-    {
-        return Ok("sqlite::memory:".to_string());
-    }
-    let db_path = dsn
-        .strip_prefix("sqlite://")
-        .ok_or_else(|| anyhow!("DSN must start with sqlite:// (got: {})", dsn))?;
-
-    let (path_str, query) = match db_path.split_once('?') {
-        Some((p, q)) => (p, Some(q)),
-        None => (db_path, None),
-    };
-
-    let mut p = PathBuf::from(path_str);
-    if p.as_os_str().is_empty() {
-        return Err(anyhow!("Empty SQLite path in DSN"));
-    }
-    if p.is_relative() {
-        p = base_dir.join(p);
-    }
-
-    if let Some(dir) = p.parent() {
-        if create_dirs {
-            std::fs::create_dir_all(dir)?;
-        }
-    }
-
-    // Rebuild DSN with absolute path and normalized slashes
-    let mut out = String::from("sqlite://");
-    out.push_str(&p.to_string_lossy().replace('\\', "/"));
-    if let Some(q) = query {
-        out.push('?');
-        out.push_str(q);
-    }
-    Ok(out)
 }
 
 /// HyperSpot Server - modular platform for AI services
@@ -162,23 +181,6 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Detect DB backend from URL scheme (sqlite/postgres/mysql).
-fn detect_from_dsn(cfg: &DatabaseConfig) -> anyhow::Result<&'static str> {
-    let raw = cfg.url.trim().to_owned();
-    if raw.is_empty() {
-        return Err(anyhow!("Database URL not configured"));
-    }
-
-    let url = Url::parse(&raw).map_err(|e| anyhow!("Invalid database DSN '{}': {}", raw, e))?;
-
-    match url.scheme() {
-        "sqlite" | "sqlite3" => Ok("sqlite"),
-        "postgres" | "postgresql" => Ok("postgres"),
-        "mysql" | "mariadb" => Ok("mysql"),
-        other => Err(anyhow!("Unsupported database type: {}", other)),
-    }
-}
-
 async fn run_server(config: AppConfig, args: CliArgs) -> Result<()> {
     tracing::info!("Initializing modules...");
 
@@ -190,53 +192,32 @@ async fn run_server(config: AppConfig, args: CliArgs) -> Result<()> {
     // Base dir for resolving relative sqlite paths (already absolute & created)
     let base_dir = PathBuf::from(&config.server.home_dir);
 
-    // Prepare DB factory if database config exists
-    let db_options = if let Some(db_config) = config.database.clone() {
-        let factory: DbFactory = Box::new(move || {
-            let args = args.clone();
-            let db_config = db_config.clone();
-            let base_dir = base_dir.clone();
+    // Prepare DB options - use new per-module system if database config is present
+    let db_options = if config.database.is_some() {
+        if args.mock {
+            // For mock mode, still use the legacy system with in-memory SQLite
+            tracing::info!("Mock mode: using in-memory SQLite for all modules");
+            let factory: DbFactory = Box::new(move || {
+                Box::pin(async move {
+                    let connect_opts = ConnectOpts {
+                        max_conns: Some(10),
+                        acquire_timeout: Some(Duration::from_secs(5)),
+                        create_sqlite_dirs: false,
+                        ..Default::default()
+                    };
 
-            Box::pin(async move {
-                let _backend = detect_from_dsn(&db_config)?;
-
-                // Use URL from config; override with in-memory SQLite when --mock is set
-                let config_dsn = db_config.url.trim().to_owned();
-                if config_dsn.is_empty() {
-                    return Err(anyhow!("Database URL not configured"));
-                }
-
-                let mut final_dsn = if args.mock {
-                    "sqlite://:memory:".to_string()
-                } else {
-                    config_dsn
-                };
-
-                // Absolutize sqlite DSNs to avoid cwd issues
-                if final_dsn.starts_with("sqlite://") {
-                    final_dsn = absolutize_sqlite_dsn(&final_dsn, &base_dir, true)?;
-                }
-
-                let connect_opts = ConnectOpts {
-                    max_conns: db_config.max_conns,
-                    acquire_timeout: Some(Duration::from_secs(5)),
-                    sqlite_busy_timeout: db_config
-                        .busy_timeout_ms
-                        .map(|ms| Duration::from_millis(ms as u64)),
-                    create_sqlite_dirs: true,
-                    ..Default::default()
-                };
-
-                tracing::info!("Connecting to database: {}", final_dsn);
-                let db = DbHandle::connect(&final_dsn, connect_opts).await?;
-                let backend = db.engine();
-                tracing::info!("Connected DB backend: {:?}", backend);
-
-                Ok(Arc::new(db))
-            })
-        });
-
-        DbOptions::Auto(factory)
+                    tracing::info!("Connecting to mock database: sqlite::memory:");
+                    let db = DbHandle::connect("sqlite::memory:", connect_opts).await?;
+                    Ok(Arc::new(db))
+                })
+            });
+            DbOptions::Auto(factory)
+        } else {
+            // Use new per-module database system
+            tracing::info!("Using per-module database configuration");
+            let factory = create_per_module_db_factory(Arc::new(config.clone()), base_dir.clone());
+            DbOptions::PerModuleFactory(factory)
+        }
     } else {
         tracing::warn!("No database configuration found, running without database");
         DbOptions::None

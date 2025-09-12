@@ -87,6 +87,51 @@ impl ModuleRegistry {
         Ok(())
     }
 
+    /// Run init phase with per-module database factory
+    pub async fn run_init_phase_with_factory(
+        &self,
+        base_ctx: &context::ModuleCtx,
+        db_factory: &crate::runtime::PerModuleDbFactory,
+    ) -> Result<(), RegistryError> {
+        for e in &self.modules {
+            let mut ctx_builder =
+                context::ModuleCtxBuilder::new(base_ctx.cancellation_token().clone())
+                    .with_client_hub(base_ctx.client_hub());
+
+            // Add config provider if available
+            if let Some(provider) = base_ctx.config_provider.clone() {
+                ctx_builder = ctx_builder.with_config_provider(provider);
+            }
+
+            // Get module-specific DB handle using factory
+            match (db_factory)(e.name).await {
+                Ok(Some(db_handle)) => {
+                    ctx_builder = ctx_builder.with_db(db_handle);
+                }
+                Ok(None) => {
+                    tracing::debug!("Module '{}' has no database configuration", e.name);
+                }
+                Err(err) => {
+                    return Err(RegistryError::Init {
+                        module: e.name,
+                        source: err,
+                    });
+                }
+            }
+
+            let ctx = ctx_builder.build().for_module(e.name);
+
+            e.core
+                .init(&ctx)
+                .await
+                .map_err(|source| RegistryError::Init {
+                    module: e.name,
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
     pub async fn run_db_phase(&self, db: &db::DbHandle) -> Result<(), RegistryError> {
         for e in &self.modules {
             if let Some(dbm) = &e.db {
@@ -98,6 +143,42 @@ impl ModuleRegistry {
                         module: e.name,
                         source,
                     })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Run DB migration phase with per-module database factory
+    pub async fn run_db_phase_with_factory(
+        &self,
+        db_factory: &crate::runtime::PerModuleDbFactory,
+    ) -> Result<(), RegistryError> {
+        for e in &self.modules {
+            if let Some(dbm) = &e.db {
+                match (db_factory)(e.name).await {
+                    Ok(Some(db_handle)) => {
+                        // If you want advisory locks, do it here (kept minimal for portability):
+                        // let _lock = db_handle.lock(e.name, "migration").await?;
+                        dbm.migrate(&db_handle).await.map_err(|source| {
+                            RegistryError::DbMigrate {
+                                module: e.name,
+                                source,
+                            }
+                        })?;
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "Module '{}' has DbModule trait but no database configured",
+                            e.name
+                        );
+                    }
+                    Err(err) => {
+                        return Err(RegistryError::DbMigrate {
+                            module: e.name,
+                            source: err,
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -154,6 +235,84 @@ impl ModuleRegistry {
         for e in &self.modules {
             if let Some(rest) = &e.rest {
                 let ctx = base_ctx.clone().for_module(e.name);
+                router = rest
+                    .register_rest(&ctx, router, registry)
+                    .map_err(|source| RegistryError::RestRegister {
+                        module: e.name,
+                        source,
+                    })?;
+            }
+        }
+
+        // 3) Host finalize: attach /openapi.json and /docs, persist Router if needed (no server start)
+        router = host.rest_finalize(&host_ctx, router).map_err(|source| {
+            RegistryError::RestFinalize {
+                module: host_entry.name,
+                source,
+            }
+        })?;
+
+        Ok(router)
+    }
+
+    /// Run REST phase with per-module database factory
+    pub fn run_rest_phase_with_factory(
+        &self,
+        base_ctx: &context::ModuleCtx,
+        _db_factory: &crate::runtime::PerModuleDbFactory,
+        mut router: Router,
+    ) -> Result<Router, RegistryError> {
+        // Find host(s) and whether any rest modules exist
+        let hosts: Vec<_> = self
+            .modules
+            .iter()
+            .filter(|e| e.rest_host.is_some())
+            .collect();
+
+        match hosts.len() {
+            0 => {
+                return if self.modules.iter().any(|e| e.rest.is_some()) {
+                    Err(RegistryError::RestRequiresHost)
+                } else {
+                    Ok(router)
+                }
+            }
+            1 => { /* proceed */ }
+            _ => return Err(RegistryError::MultipleRestHosts),
+        }
+
+        // Resolve the single host entry and its module context
+        let host_idx = self
+            .modules
+            .iter()
+            .position(|e| e.rest_host.is_some())
+            .ok_or(RegistryError::RestHostNotFoundAfterValidation)?;
+        let host_entry = &self.modules[host_idx];
+        let Some(host) = host_entry.rest_host.as_ref() else {
+            return Err(RegistryError::RestHostMissingFromEntry);
+        };
+
+        // Build host context with its DB handle if available - this is sync so can't use factory
+        // For REST phase, we assume DB handles are already created during init phase
+        let host_ctx = base_ctx.clone().for_module(host_entry.name);
+
+        // use host as the registry
+        let registry: &dyn contracts::OpenApiRegistry = host.as_registry();
+
+        // 1) Host prepare: base Router / global middlewares / basic OAS meta
+        router =
+            host.rest_prepare(&host_ctx, router)
+                .map_err(|source| RegistryError::RestPrepare {
+                    module: host_entry.name,
+                    source,
+                })?;
+
+        // 2) Register all REST providers (in the current discovery order)
+        for e in &self.modules {
+            if let Some(rest) = &e.rest {
+                // Use the context from init phase (already has the DB handle)
+                let ctx = base_ctx.clone().for_module(e.name);
+
                 router = rest
                     .register_rest(&ctx, router, registry)
                     .map_err(|source| RegistryError::RestRegister {

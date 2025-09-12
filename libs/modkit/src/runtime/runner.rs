@@ -11,14 +11,23 @@ pub type DbFactory = Box<
         + Sync,
 >;
 
+/// Per-module database factory - takes module name and returns a database handle for that module.
+pub type PerModuleDbFactory = Box<
+    dyn Fn(&str) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<Arc<db::DbHandle>>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// The way to get a DB handle.
 pub enum DbOptions {
     /// Do not open a DB.
     None,
-    /// A ready handle from the caller.
+    /// A ready handle from the caller (legacy, single DB for all modules).
     Existing(Arc<db::DbHandle>),
-    /// Call a factory (closure can close anything: AppConfig, env, etc.).
+    /// Call a factory (closure can close anything: AppConfig, env, etc.) (legacy, single DB for all modules).
     Auto(DbFactory),
+    /// Per-module database factory - will be called for each module during initialization.
+    PerModuleFactory(PerModuleDbFactory),
 }
 
 /// The way to decide when to stop.
@@ -44,13 +53,6 @@ pub struct RunOptions {
 /// Full cycle: init + DB + REST (sync) + start + wait + stop.
 /// Full cycle: init → DB → REST (sync) → start → wait → stop.
 pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
-    // Initialize DB by the chosen strategy.
-    let db_handle = match &opts.db {
-        DbOptions::None => None,
-        DbOptions::Existing(h) => Some(h.clone()),
-        DbOptions::Auto(factory) => Some((factory)().await?),
-    };
-
     // Common objects: ClientHub and CancellationToken.
     let hub = Arc::new(crate::client_hub::ClientHub::default());
     let cancel = match &opts.shutdown {
@@ -90,28 +92,68 @@ pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
         }
     }
 
-    // Build the base ModuleCtx (builder — crate-private; outward — read-only API).
-    let mut b = ModuleCtxBuilder::new(cancel.clone())
-        .with_client_hub(hub.clone())
-        .with_config_provider(opts.modules_cfg.clone());
-    if let Some(db) = &db_handle {
-        b = b.with_db(db.clone());
-    }
-    let base_ctx = b.build();
+    // Initialize databases based on the chosen strategy.
+    let (legacy_db_handle, per_module_factory) = match &opts.db {
+        DbOptions::None => (None, None),
+        DbOptions::Existing(h) => (Some(h.clone()), None),
+        DbOptions::Auto(factory) => (Some((factory)().await?), None),
+        DbOptions::PerModuleFactory(factory) => {
+            tracing::info!("Using per-module database factory");
+            (None, Some(factory))
+        }
+    };
 
     // Discover modules and strict order of phases.
     let registry = crate::registry::ModuleRegistry::discover_and_build()?;
 
-    tracing::info!("Phase: init");
-    registry.run_init_phase(&base_ctx).await?;
+    // Build base context and per-module contexts
+    let base_ctx = ModuleCtxBuilder::new(cancel.clone())
+        .with_client_hub(hub.clone())
+        .with_config_provider(opts.modules_cfg.clone())
+        .build();
 
-    if let Some(db) = &db_handle {
-        tracing::info!("Phase: db");
+    tracing::info!("Phase: init");
+    if let Some(factory) = &per_module_factory {
+        // Per-module mode: create contexts with individual DB handles using factory
+        registry
+            .run_init_phase_with_factory(&base_ctx, factory)
+            .await?;
+    } else {
+        // Legacy mode: use shared DB handle for all modules
+        let mut b = ModuleCtxBuilder::new(cancel.clone())
+            .with_client_hub(hub.clone())
+            .with_config_provider(opts.modules_cfg.clone());
+        if let Some(db) = &legacy_db_handle {
+            b = b.with_db(db.clone());
+        }
+        let shared_ctx = b.build();
+        registry.run_init_phase(&shared_ctx).await?;
+    }
+
+    // DB migration phase
+    if let Some(db) = &legacy_db_handle {
+        tracing::info!("Phase: db (legacy single DB)");
         registry.run_db_phase(db).await?;
+    } else if let Some(factory) = &per_module_factory {
+        tracing::info!("Phase: db (per-module)");
+        registry.run_db_phase_with_factory(factory).await?;
     }
 
     tracing::info!("Phase: rest (sync)");
-    let _app = registry.run_rest_phase(&base_ctx, axum::Router::new())?;
+    let _app = if let Some(factory) = &per_module_factory {
+        // Per-module: use factory for REST phase
+        registry.run_rest_phase_with_factory(&base_ctx, factory, axum::Router::new())?
+    } else {
+        // Legacy: shared context
+        let mut b = ModuleCtxBuilder::new(cancel.clone())
+            .with_client_hub(hub.clone())
+            .with_config_provider(opts.modules_cfg.clone());
+        if let Some(db) = &legacy_db_handle {
+            b = b.with_db(db.clone());
+        }
+        let context_for_rest = b.build();
+        registry.run_rest_phase(&context_for_rest, axum::Router::new())?
+    };
 
     tracing::info!("Phase: start");
     registry.run_start_phase(cancel.clone()).await?;
@@ -123,6 +165,9 @@ pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
     registry.run_stop_phase(cancel).await?;
     Ok(())
 }
+
+// Removed per-module database initialization functions that depend on runtime types.
+// Per-module database handling is now done via PerModuleDbFactory in the main application.
 
 #[cfg(feature = "hs-runtime")]
 #[allow(dead_code)]

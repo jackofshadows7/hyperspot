@@ -23,3 +23,7 @@ tempfile = "3.21"
 tokio = { workspace = true }
 chrono = { workspace = true }
 thiserror = "2.0"
+dsn = { workspace = true }
+humantime-serde = { workspace = true }
+url = { workspace = true }
+regex = { workspace = true }

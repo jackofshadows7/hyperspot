@@ -1,0 +1,163 @@
+# HyperSpot Server Configuration - Advanced Example
+# Demonstrates the new ModKit DB Handling system with various database configurations
+
+# Core server configuration
+server:
+  home_dir: "~/.hyperspot"
+
+# Database configuration using simplified structure
+database:
+  servers:
+    # Main PostgreSQL server for production modules
+    postgres_main:
+      dsn: "postgresql://hyperspot:${PG_PASSWORD}@localhost:5432/"
+      host: "localhost"
+      port: 5432
+      user: "hyperspot" 
+      password: "${PG_PASSWORD}"
+      params:
+        sslmode: "require"
+        application_name: "hyperspot"
+      pool:
+        max_conns: 20
+        acquire_timeout: "30s"
+    
+    # Separate PostgreSQL server for analytics
+    postgres_analytics:
+      dsn: "postgresql://analytics:${ANALYTICS_PASSWORD}@analytics-db:5432/"
+      pool:
+        max_conns: 10
+        acquire_timeout: "15s"
+    
+    # MySQL server example  
+    mysql_reporting:
+      host: "mysql-server"
+      port: 3306
+      user: "reporting_user"
+      password: "${MYSQL_PASSWORD}"
+      params:
+        charset: "utf8mb4"
+      pool:
+        max_conns: 8
+    
+    # SQLite servers for different modules
+    sqlite_users:
+      dsn: "sqlite://users_info.db?wal=true&synchronous=NORMAL&busy_timeout=5000"
+      pool:
+        max_conns: 5
+        acquire_timeout: "30s"
+    
+    sqlite_analytics:
+      dsn: "sqlite://analytics.db?wal=false&synchronous=FULL&busy_timeout=10000"
+      pool:
+        max_conns: 3
+        acquire_timeout: "15s"
+
+# Logging configuration
+logging:
+  default:
+    console_level: info
+    file: "logs/hyperspot.log"
+    file_level: warn
+    max_age_days: 28
+    max_backups: 3
+    max_size_mb: 1000
+
+# Per-module configurations demonstrating different database patterns
+modules:
+  # Module without database
+  api_ingress:
+    config:
+      bind_addr: "127.0.0.1:8087"
+      enable_docs: true
+      cors_enabled: true
+
+  # Module with SQLite database via server reference
+  users_info:
+    database:
+      server: "sqlite_users"
+    config:
+      default_page_size: 50
+      max_page_size: 1000
+
+  # Module using PostgreSQL server with custom database name
+  analytics:
+    database:
+      server: "postgres_main"
+      dbname: "analytics"
+      params:
+        application_name: "analytics-module"
+      pool:
+        max_conns: 8
+    config:
+      retention_days: 365
+      batch_size: 1000
+
+  # Module with custom PostgreSQL server and database
+  billing:
+    database:
+      server: "postgres_analytics"
+      dbname: "billing"
+      pool:
+        max_conns: 5
+    config:
+      currency: "USD"
+      invoice_retention_days: 2555  # 7 years
+
+  # Module with full custom DSN
+  audit_logs:
+    database:
+      dsn: "postgresql://audit:${AUDIT_PASSWORD}@audit-db:5432/audit_logs?sslmode=require"
+      pool:
+        max_conns: 3
+    config:
+      log_level: "detailed"
+      compression: true
+
+  # Module with SQLite using absolute path
+  cache:
+    database:
+      path: "/var/cache/hyperspot/cache.db"
+      pool:
+        max_conns: 10
+    config:
+      max_size_mb: 500
+      ttl_hours: 24
+
+  # Module using MySQL server
+  reporting:
+    database:
+      server: "mysql_reporting"
+      dbname: "reports"
+      pool:
+        max_conns: 6
+    config:
+      report_formats: ["pdf", "csv", "json"]
+      max_concurrent_reports: 5
+
+  # Module with SQLite in-memory database (for testing/temp data)
+  session_store:
+    database:
+      dsn: "sqlite::memory:"
+      pool:
+        max_conns: 1
+    config:
+      session_timeout_minutes: 30
+      cleanup_interval_minutes: 5
+
+  # Module with field-based PostgreSQL config (no DSN)
+  notifications:
+    database:
+      host: "notifications-db"
+      port: 5432
+      user: "notifier"
+      password: "${NOTIFIER_PASSWORD}"
+      dbname: "notifications"
+      params:
+        sslmode: "prefer"
+      pool:
+        max_conns: 4
+    config:
+      email_enabled: true
+      sms_enabled: false
+      webhook_timeout_sec: 30

@@ -68,6 +68,8 @@
 //! ```
 use std::time::Duration;
 
+// Used for parsing SQLite DSN query parameters
+
 #[cfg(feature = "mysql")]
 use sqlx::{mysql::MySqlPoolOptions, MySql, MySqlPool};
 #[cfg(feature = "pg")]
@@ -345,26 +347,55 @@ impl DbHandle {
                     o = o.test_before_acquire(true);
                 }
 
-                // Copy busy timeout into the closure (per-connection PRAGMAs)
-                let busy = opts.sqlite_busy_timeout;
+                // Parse pragma settings from DSN query parameters
+                let dsn_pragmas = parse_sqlite_pragmas_from_dsn(&dsn);
+
                 o = o.after_connect(move |conn, _meta| {
-                    let busy = busy;
+                    let pragmas = dsn_pragmas.clone();
+                    let fallback_busy_timeout = opts.sqlite_busy_timeout;
                     Box::pin(async move {
-                        // Each call borrows `conn` mutably for the duration of the await,
-                        // without moving the &mut SqliteConnection itself.
-                        sqlx::query("PRAGMA journal_mode = WAL")
-                            .execute(&mut *conn)
-                            .await?;
+                        // Apply WAL mode if specified in params (default: WAL)
+                        if let Some(wal_str) = pragmas.get("wal") {
+                            let mode = if wal_str.eq_ignore_ascii_case("true") || wal_str == "1" {
+                                "WAL"
+                            } else {
+                                "DELETE"
+                            };
+                            let stmt = format!("PRAGMA journal_mode = {}", mode);
+                            sqlx::query(&stmt).execute(&mut *conn).await?;
+                        } else {
+                            // Default to WAL mode
+                            sqlx::query("PRAGMA journal_mode = WAL")
+                                .execute(&mut *conn)
+                                .await?;
+                        }
 
-                        sqlx::query("PRAGMA synchronous = NORMAL")
-                            .execute(&mut *conn)
-                            .await?;
+                        // Apply synchronous mode if specified in params (default: NORMAL)
+                        if let Some(sync_mode) = pragmas.get("synchronous") {
+                            let stmt = format!("PRAGMA synchronous = {}", sync_mode);
+                            sqlx::query(&stmt).execute(&mut *conn).await?;
+                        } else {
+                            // Default to NORMAL
+                            sqlx::query("PRAGMA synchronous = NORMAL")
+                                .execute(&mut *conn)
+                                .await?;
+                        }
 
-                        if let Some(ms) = busy {
-                            // PRAGMA can't use bind parameters; use a numeric literal.
-                            let ms = std::cmp::min(ms.as_millis(), i64::MAX as u128) as i64;
+                        // Apply busy timeout from params or fallback to opts
+                        if let Some(timeout_str) = pragmas.get("busy_timeout") {
+                            if let Ok(timeout_ms) = timeout_str.parse::<i64>() {
+                                let stmt = format!("PRAGMA busy_timeout = {timeout_ms}");
+                                sqlx::query(&stmt).execute(&mut *conn).await?;
+                            }
+                        } else if let Some(timeout) = fallback_busy_timeout {
+                            let ms = std::cmp::min(timeout.as_millis(), i64::MAX as u128) as i64;
                             let stmt = format!("PRAGMA busy_timeout = {ms}");
                             sqlx::query(&stmt).execute(&mut *conn).await?;
+                        } else {
+                            // Default to 5 seconds
+                            sqlx::query("PRAGMA busy_timeout = 5000")
+                                .execute(&mut *conn)
+                                .await?;
                         }
 
                         Ok(())
@@ -620,6 +651,33 @@ fn prepare_sqlite_path(dsn: &str, create_dirs: bool) -> Result<String> {
     }
 
     Ok(dsn.to_string())
+}
+
+/// Parse SQLite PRAGMA settings from DSN query parameters.
+/// Returns a HashMap of parameter names to values for SQLite-specific PRAGMAs.
+fn parse_sqlite_pragmas_from_dsn(dsn: &str) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+
+    let mut pragmas = HashMap::new();
+
+    // Parse the DSN as a URL to extract query parameters
+    if let Ok(url) = url::Url::parse(dsn) {
+        for (key, value) in url.query_pairs() {
+            // Convert known PRAGMA names to lowercase for consistent matching
+            let key_lower = key.to_lowercase();
+            match key_lower.as_str() {
+                "wal" | "synchronous" | "busy_timeout" => {
+                    pragmas.insert(key_lower, value.to_string());
+                }
+                _ => {
+                    // Keep other parameters as-is for general SQLite PRAGMAs
+                    pragmas.insert(key.to_string(), value.to_string());
+                }
+            }
+        }
+    }
+
+    pragmas
 }
 
 // ===================== tests =====================
