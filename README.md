@@ -6,7 +6,7 @@ HyperSpot Server is a modular, high-performance platform for AI services built i
 
 ### Prerequisites
 
-- Rust 1.75+ with Cargo
+- Rust stable with Cargo
 - Optional: PostgreSQL (can run with SQLite or in-memory database)
 
 ### CI/Development Commands
@@ -14,16 +14,17 @@ HyperSpot Server is a modular, high-performance platform for AI services built i
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd lmstudio-rust
+cd hyperspot
 
 # Unix/Linux/macOS (using Makefile)
-make ci       # Run full CI pipeline (linting, tests, security checks)
-make fmt      # Format code
-make clippy   # Lint code  
-make test     # Run tests
-make check    # All checks
-make audit    # Security audit
-make deny     # License and dependency checks
+make ci         # Run full CI pipeline (fmt-check, clippy, tests, security)
+make fmt        # Check formatting (no changes). Use 'make dev-fmt' to auto-format
+make clippy     # Lint (deny warnings). Use 'make dev-clippy' to attempt auto-fix
+make test       # Run tests
+make example    # Run modkit example module
+make check      # All checks (fmt-check + clippy + test + audit + deny)
+make audit      # Security audit
+make deny       # License and dependency checks
 
 # Windows (using PowerShell script)
 ./scripts/ci.ps1 check        # Run full CI pipeline
@@ -39,6 +40,9 @@ make deny     # License and dependency checks
 ### Running the Server
 
 ```bash
+# Quick helper
+make quickstart
+
 # Option 1: Run with SQLite database (recommended for development)
 cargo run --bin hyperspot-server -- --config config/quickstart.yaml run
 
@@ -200,10 +204,8 @@ async fn list_resources_handler() -> Result<Json<Vec<MyResource>>, modkit::Probl
 
 ## 📖 Documentation
 
-- **[Architecture Guide](docs/ARCHITECTURE.md)** - System design, module lifecycle, and data flow
 - **[Module Development Guide](docs/MODKIT_UNIFIED_SYSTEM.md)** - How to create modules with the ModKit framework
-- **[API Ingress](docs/API_INGRESS.md)** - HTTP routing and OpenAPI documentation
-- **[Lock-Free Patterns](docs/LOCK_FREE_PATTERNS.md)** - Performance optimization patterns
+- **[Module Creation Prompt](docs/MODULE_CREATION_PROMT.md)** - Prompt for LLM-editor to generate a module from OpenAPI specification
 - **[Contributing](CONTRIBUTING.md)** - Development workflow and coding standards
 
 ## 🏗️ Key Features
@@ -283,28 +285,7 @@ OperationBuilder::post("/users")
 
 ### Handler Implementation
 
-```rust
-async fn create_user_handler(
-    Json(req): Json<CreateUserRequest>
-) -> Result<(StatusCode, Json<User>), ProblemResponse> {
-    // Validation
-    if req.email.is_empty() {
-        return Err(bad_request("Email is required"));
-    }
-    
-    // Business logic that may fail
-    match user_service.create_user(req).await {
-        Ok(user) => Ok((StatusCode::CREATED, Json(user))),
-        Err(DomainError::EmailAlreadyExists { email }) => {
-            Err(conflict(format!("Email '{}' is already in use", email)))
-        }
-        Err(e) => {
-            tracing::error!("Failed to create user: {}", e);
-            Err(internal_error("User creation failed"))
-        }
-    }
-}
-```
+TBD
 
 ## 🔧 Configuration
 
@@ -427,7 +408,7 @@ Benchmarks show excellent performance for production workloads with minimal reso
 1. **Clone and Setup**:
    ```bash
    git clone <repository-url>
-   cd lmstudio-rust
+   cd hyperspot
    cargo build
    ```
 
