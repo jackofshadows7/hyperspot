@@ -62,7 +62,7 @@ impl Module for FullFeaturedModule {
 }
 #[async_trait]
 impl DbModule for FullFeaturedModule {
-    async fn migrate(&self, _db: &db::DbHandle) -> Result<()> {
+    async fn migrate(&self, _db: &modkit_db::DbHandle) -> Result<()> {
         Ok(())
     }
 }
@@ -136,7 +136,7 @@ impl Module for DbOnlyModule {
 }
 #[async_trait]
 impl DbModule for DbOnlyModule {
-    async fn migrate(&self, _db: &db::DbHandle) -> Result<()> {
+    async fn migrate(&self, _db: &modkit_db::DbHandle) -> Result<()> {
         Ok(())
     }
 }

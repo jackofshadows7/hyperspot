@@ -4,7 +4,7 @@ mod tests {
     use sea_orm::entity::prelude::*;
     use std::str::FromStr;
 
-    use db::odata::{expr_to_condition, FieldKind, FieldMap};
+    use modkit_db::odata::{expr_to_condition, FieldKind, FieldMap};
     use odata_core::ast::{CompareOperator, Expr, Value};
 
     // Simple test entity for compilation tests

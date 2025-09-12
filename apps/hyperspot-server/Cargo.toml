@@ -18,7 +18,7 @@ mimalloc = { version="0.1" }
 # Local crates
 runtime = { path = "../../libs/runtime" }
 modkit = { path = "../../libs/modkit" }
-db = { path = "../../libs/db", features = ["sqlite"] }
+modkit-db = { path = "../../libs/modkit-db", features = ["sqlite"] }
 api_ingress = { path = "../../modules/api_ingress"}
 
 anyhow = { workspace = true }
@@ -26,6 +26,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+figment = { version = "0.10", features = ["yaml", "env"] }
 url = "2.5"
 # SQLx for driver registration workaround
 sqlx = { workspace = true, features = ["postgres", "sqlite"] }

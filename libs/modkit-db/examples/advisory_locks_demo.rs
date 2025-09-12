@@ -1,6 +1,6 @@
 //! Demo of the enhanced advisory locks with namespacing and try_lock functionality.
 
-use db::{ConnectOpts, DbHandle, LockConfig};
+use modkit_db::{ConnectOpts, DbHandle, LockConfig};
 use std::time::Duration;
 
 #[tokio::main]

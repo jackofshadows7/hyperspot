@@ -15,7 +15,7 @@ use modkit::{
     context::{ConfigProvider, ModuleCtx},
     contracts::{DbModule, Module, OpenApiRegistry, RestfulModule, StatefulModule},
     registry::{ModuleRegistry, RegistryBuilder},
-    runtime::{run, DbFactory, DbOptions, RunOptions, ShutdownOptions},
+    runtime::{run, DbOptions, RunOptions, ShutdownOptions},
 };
 
 // Test tracking infrastructure
@@ -153,7 +153,7 @@ impl Module for TestModule {
 
 #[async_trait::async_trait]
 impl DbModule for TestModule {
-    async fn migrate(&self, _db: &db::DbHandle) -> anyhow::Result<()> {
+    async fn migrate(&self, _db: &modkit_db::DbHandle) -> anyhow::Result<()> {
         self.calls
             .lock()
             .unwrap()
@@ -230,24 +230,25 @@ fn create_test_registry(modules: Vec<TestModule>) -> anyhow::Result<ModuleRegist
     Ok(builder.build_topo_sorted()?)
 }
 
-// Mock DB factory for testing
-fn create_mock_db_factory() -> DbFactory {
-    Box::new(|| {
-        Box::pin(async {
-            match db::DbHandle::connect("sqlite::memory:", db::ConnectOpts::default()).await {
-                Ok(handle) => Ok(Arc::new(handle)),
-                Err(e) if matches!(e, db::DbError::FeatureDisabled(_)) => {
-                    // Preserve original error but wrap into anyhow
-                    anyhow::bail!("DB features not enabled in test environment: {e}")
-                }
-                Err(e) => Err(anyhow::Error::new(e)), // convert DbError -> anyhow::Error
-            }
-        })
-    })
-}
+// Helper function to create a mock DbManager for testing
+fn create_mock_db_manager() -> Arc<modkit_db::DbManager> {
+    use figment::{providers::Serialized, Figment};
 
-fn create_failing_db_factory() -> DbFactory {
-    Box::new(|| Box::pin(async { anyhow::bail!("DB factory failed") }))
+    // Create a simple figment with mock database configuration
+    let figment = Figment::new().merge(Serialized::defaults(serde_json::json!({
+        "test_module": {
+            "database": {
+                "dsn": "sqlite::memory:",
+                "params": {
+                    "journal_mode": "WAL"
+                }
+            }
+        }
+    })));
+
+    let home_dir = std::path::PathBuf::from("/tmp/test");
+
+    Arc::new(modkit_db::DbManager::from_figment(figment, home_dir).unwrap())
 }
 
 #[tokio::test]
@@ -271,79 +272,35 @@ async fn test_db_options_none() {
 }
 
 #[tokio::test]
-async fn test_db_options_existing() {
+async fn test_db_options_manager() {
     let cancel = CancellationToken::new();
-    cancel.cancel(); // Immediate shutdown
 
-    // Returns db::Result<DbHandle> now (typed error)
-    let db_result = db::DbHandle::connect("sqlite::memory:", db::ConnectOpts::default()).await;
-
-    match db_result {
-        Ok(db) => {
-            let opts = RunOptions {
-                modules_cfg: Arc::new(MockConfigProvider::new()),
-                db: DbOptions::Existing(Arc::new(db)),
-                shutdown: ShutdownOptions::Token(cancel),
-            };
-
-            let result = timeout(Duration::from_millis(250), run(opts)).await;
-            assert!(result.is_ok(), "run() did not complete within timeout");
-        }
-
-        // Skip when DB backends are not compiled in
-        Err(db::DbError::FeatureDisabled(_)) => {
-            eprintln!("Skipping test_db_options_existing: DB features not enabled");
-            return;
-        }
-
-        Err(e) => {
-            panic!("Unexpected DB error: {e}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_db_options_auto_success() {
-    let cancel = CancellationToken::new();
-    cancel.cancel(); // Immediate shutdown
+    // Cancel after a brief delay
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel_clone.cancel();
+    });
 
     let opts = RunOptions {
-        modules_cfg: Arc::new(MockConfigProvider::new()),
-        db: DbOptions::Auto(create_mock_db_factory()),
+        modules_cfg: Arc::new(MockConfigProvider::new().with_config(
+            "test_module",
+            serde_json::json!({
+                "database": {
+                    "dsn": "sqlite::memory:"
+                },
+                "config": {}
+            }),
+        )),
+        db: DbOptions::Manager(create_mock_db_manager()),
         shutdown: ShutdownOptions::Token(cancel),
     };
 
-    let result = timeout(Duration::from_millis(100), run(opts)).await;
+    let result = timeout(Duration::from_millis(1000), run(opts)).await;
     assert!(result.is_ok());
-
     let run_result = result.unwrap();
-    // The test might fail if DB features aren't available, which is acceptable
-    if let Err(e) = &run_result {
-        if e.to_string().contains("DB features not enabled") {
-            println!("Skipping test_db_options_auto_success: DB features not enabled");
-            return;
-        }
-    }
+    // Should succeed with DbManager approach
     assert!(run_result.is_ok());
-}
-
-#[tokio::test]
-async fn test_db_options_auto_failure() {
-    let cancel = CancellationToken::new();
-
-    let opts = RunOptions {
-        modules_cfg: Arc::new(MockConfigProvider::new()),
-        db: DbOptions::Auto(create_failing_db_factory()),
-        shutdown: ShutdownOptions::Token(cancel),
-    };
-
-    let result = timeout(Duration::from_millis(100), run(opts)).await;
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
-    assert!(run_result.is_err());
-
-    let error_msg = run_result.unwrap_err().to_string();
-    assert!(error_msg.contains("DB factory failed"));
 }
 
 #[tokio::test]

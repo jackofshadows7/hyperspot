@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::contract::User;
 use crate::domain::repo::UsersRepository;
 use crate::infra::storage::entity::{ActiveModel as UserAM, Column, Entity as UserEntity};
-use db::odata;
+use modkit_db::odata;
 use odata_core::ODataQuery;
 use odata_core::Page;
 
@@ -115,13 +115,13 @@ where
         &self,
         query: &ODataQuery,
     ) -> Result<Page<User>, odata_core::ODataPageError> {
-        db::odata::paginate_with_odata::<UserEntity, User, _, _>(
+        modkit_db::odata::paginate_with_odata::<UserEntity, User, _, _>(
             UserEntity::find(),
             &self.conn,
             query,
             &USER_FMAP,
             ("id", SortDir::Desc),
-            db::odata::LimitCfg {
+            modkit_db::odata::LimitCfg {
                 default: 25,
                 max: 1000,
             },

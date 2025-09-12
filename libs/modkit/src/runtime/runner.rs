@@ -1,64 +1,59 @@
+//! ModKit runtime runner.
+//!
+//! Supported DB modes:
+//!   - `DbOptions::None` — modules get no DB in their contexts.
+//!   - `DbOptions::Manager` — modules use async DB access through DbManager.
+//!
+//! Design notes:
+//! - We build **one stable ModuleCtx** (`base_ctx`) and reuse it across all phases
+//!   (init → db → rest → start → wait → stop). When using DbManager, modules
+//!   access databases asynchronously through the shared manager context.
+//! - Shutdown can be driven by OS signals, an external `CancellationToken`,
+//!   or an arbitrary future.
+
 use crate::context::{ConfigProvider, ModuleCtxBuilder};
 use crate::runtime::shutdown;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-/// Async factory for auto-initializing the database (the caller decides where to obtain
-/// configuration/settings from).
-pub type DbFactory = Box<
-    dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<Arc<db::DbHandle>>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// The way to get a DB handle.
+/// How the runtime should provide DBs to modules.
 pub enum DbOptions {
-    /// Do not open a DB.
+    /// No database integration. `ModuleCtx::db()` will be `None`, `db_required()` will error.
     None,
-    /// A ready handle from the caller.
-    Existing(Arc<db::DbHandle>),
-    /// Call a factory (closure can close anything: AppConfig, env, etc.).
-    Auto(DbFactory),
+    /// Use a DbManager to handle database connections with Figment-based configuration.
+    Manager(Arc<modkit_db::DbManager>),
 }
 
-/// The way to decide when to stop.
+/// How the runtime should decide when to stop.
 pub enum ShutdownOptions {
-    /// Wait for system signals (Ctrl+C / SIGTERM).
+    /// Listen for OS signals (Ctrl+C / SIGTERM).
     Signals,
-    /// External CancellationToken.
+    /// An external `CancellationToken` controls the lifecycle.
     Token(CancellationToken),
-    /// Arbitrary future, when it completes, we initiate shutdown.
+    /// An arbitrary future; when it completes, we initiate shutdown.
     Future(Pin<Box<dyn Future<Output = ()> + Send>>),
 }
 
-/// Options for running ModKit runner.
+/// Options for running the ModKit runner.
 pub struct RunOptions {
     /// Provider of module config sections (raw JSON by module name).
     pub modules_cfg: Arc<dyn ConfigProvider>,
-    /// DB initialization strategy.
+    /// DB strategy: none, or DbManager.
     pub db: DbOptions,
     /// Shutdown strategy.
     pub shutdown: ShutdownOptions,
 }
 
-/// Full cycle: init + DB + REST (sync) + start + wait + stop.
-/// Full cycle: init → DB → REST (sync) → start → wait → stop.
+/// Full cycle: init → db → rest (sync) → start → wait → stop.
 pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
-    // Initialize DB by the chosen strategy.
-    let db_handle = match &opts.db {
-        DbOptions::None => None,
-        DbOptions::Existing(h) => Some(h.clone()),
-        DbOptions::Auto(factory) => Some((factory)().await?),
-    };
-
-    // Common objects: ClientHub and CancellationToken.
+    // Stable components shared across all phases.
     let hub = Arc::new(crate::client_hub::ClientHub::default());
     let cancel = match &opts.shutdown {
         ShutdownOptions::Token(t) => t.clone(),
         _ => CancellationToken::new(),
     };
 
-    // Background shutdown waiters (cross-platform, safe)
+    // Spawn the shutdown waiter according to the chosen strategy.
     match opts.shutdown {
         ShutdownOptions::Signals => {
             let c = cancel.clone();
@@ -68,8 +63,11 @@ pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
                         tracing::info!("shutdown: signal received");
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "shutdown: primary waiter failed; falling back to ctrl_c()");
-                        // Fallback that works everywhere, incl. Windows
+                        tracing::warn!(
+                            error = %e,
+                            "shutdown: primary waiter failed; falling back to ctrl_c()"
+                        );
+                        // Cross-platform fallback.
                         let _ = tokio::signal::ctrl_c().await;
                     }
                 }
@@ -85,40 +83,64 @@ pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
             });
         }
         ShutdownOptions::Token(_) => {
-            // External owner will call cancel(); just log for clarity
+            // External owner controls lifecycle; nothing to spawn.
             tracing::info!("shutdown: external token will control lifecycle");
         }
     }
 
-    // Build the base ModuleCtx (builder — crate-private; outward — read-only API).
-    let mut b = ModuleCtxBuilder::new(cancel.clone())
-        .with_client_hub(hub.clone())
-        .with_config_provider(opts.modules_cfg.clone());
-    if let Some(db) = &db_handle {
-        b = b.with_db(db.clone());
-    }
-    let base_ctx = b.build();
-
-    // Discover modules and strict order of phases.
+    // Discover modules upfront.
     let registry = crate::registry::ModuleRegistry::discover_and_build()?;
 
-    tracing::info!("Phase: init");
-    registry.run_init_phase(&base_ctx).await?;
+    // Build ONE stable base context used across all phases.
+    let mut ctx_builder = ModuleCtxBuilder::new(cancel.clone())
+        .with_client_hub(hub.clone())
+        .with_config_provider(opts.modules_cfg.clone());
 
-    if let Some(db) = &db_handle {
-        tracing::info!("Phase: db");
-        registry.run_db_phase(db).await?;
+    // Add DbManager if using the new approach
+    if let DbOptions::Manager(ref manager) = opts.db {
+        ctx_builder = ctx_builder.with_db_manager(manager.clone());
     }
 
-    tracing::info!("Phase: rest (sync)");
-    let _app = registry.run_rest_phase(&base_ctx, axum::Router::new())?;
+    let base_ctx = ctx_builder.build();
 
+    // INIT phase
+    tracing::info!("Phase: init");
+    match &opts.db {
+        DbOptions::Manager(_) => {
+            // DbManager: modules use async DB access through the manager.
+            registry.run_init_phase(&base_ctx).await?;
+        }
+        DbOptions::None => {
+            // No DB at all — just run init with the shared base context.
+            registry.run_init_phase(&base_ctx).await?;
+        }
+    }
+
+    // DB MIGRATION phase
+    match &opts.db {
+        DbOptions::Manager(_) => {
+            tracing::info!("Phase: db (manager)");
+            // DbManager approach: modules will handle their own DB migration
+            // during their lifecycle using async DB access
+            // No centralized migration phase needed
+        }
+        DbOptions::None => {
+            // No DB — nothing to migrate.
+        }
+    }
+
+    // REST phase (synchronous router composition against ingress).
+    tracing::info!("Phase: rest (sync)");
+    let _ = registry.run_rest_phase(&base_ctx, axum::Router::new())?;
+
+    // START phase
     tracing::info!("Phase: start");
     registry.run_start_phase(cancel.clone()).await?;
 
-    // Wait for cancellation (signals/token/future).
+    // WAIT
     cancel.cancelled().await;
 
+    // STOP phase
     tracing::info!("Phase: stop");
     registry.run_stop_phase(cancel).await?;
     Ok(())

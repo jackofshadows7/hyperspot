@@ -9,72 +9,95 @@
     )
 )]
 
-//! Database abstraction crate providing a database-agnostic `DbHandle`.
+//! ModKit Database abstraction crate.
 //!
 //! This crate provides a unified interface for working with different databases
 //! (SQLite, PostgreSQL, MySQL) through SQLx, with optional SeaORM integration.
+//! It emphasizes typed connection options over DSN string manipulation and
+//! implements strict security controls (e.g., SQLite PRAGMA whitelist).
 //!
 //! # Features
 //! - `pg`, `mysql`, `sqlite`: enable SQLx backends
 //! - `sea-orm`: add SeaORM integration for type-safe operations
 //!
-//! # Example
+//! # New Architecture
+//! The crate now supports:
+//! - Typed `DbConnectOptions` using sqlx ConnectOptions (no DSN string building)
+//! - Per-module database factories with configuration merging
+//! - SQLite PRAGMA whitelist for security
+//! - Environment variable expansion in passwords and DSNs
+//!
+//! # Example (Legacy DbHandle API)
 //! ```rust,no_run
 //! #[tokio::main]
-//! async fn main() -> db::Result<()> {
-//!     use db::{DbHandle, ConnectOpts};
+//! async fn main() -> modkit_db::Result<()> {
+//!     use modkit_db::{DbHandle, ConnectOpts};
 //!
 //!     let db = DbHandle::connect("postgres://user:pass@localhost/app", ConnectOpts::default()).await?;
-//!
-//!     // sqlx
-//!     #[cfg(feature="pg")]
-//!     {
-//!         let pool = db.sqlx_postgres().unwrap();
-//!         // Help type inference for doctests: specify database type explicitly
-//!         sqlx::query::<sqlx::Postgres>("select 1").execute(pool).await?;
-//!
-//!         // Execute within a dedicated connection (doctest-friendly)
-//!         let mut conn = pool.acquire().await?;
-//!         sqlx::query::<sqlx::Postgres>("select 2").execute(&mut *conn).await?;
-//!     }
-//!
-//!     #[cfg(feature="mysql")]
-//!     {
-//!         let pool = db.sqlx_mysql().unwrap();
-//!         sqlx::query::<sqlx::MySql>("select 1").execute(pool).await?;
-//!
-//!         let mut conn = pool.acquire().await?;
-//!         sqlx::query::<sqlx::MySql>("select 2").execute(&mut *conn).await?;
-//!     }
-//!
-//!     #[cfg(feature="sqlite")]
-//!     {
-//!         let pool = db.sqlx_sqlite().unwrap();
-//!         sqlx::query::<sqlx::Sqlite>("select 1").execute(pool).await?;
-//!
-//!         let mut conn = pool.acquire().await?;
-//!         sqlx::query::<sqlx::Sqlite>("select 2").execute(&mut *conn).await?;
-//!     }
-//!
-//!     // sea-orm (if enabled)
-//!     #[cfg(feature="sea-orm")]
-//!     {
-//!         use sea_orm::{ConnectionTrait, Statement, DatabaseBackend};
-//!         db.sea().execute(Statement::from_string(DatabaseBackend::Postgres, "SELECT 3")).await?;
-//!     }
-//!
+//!     
+//!     // Use db.sqlx_postgres(), db.sea(), etc.
 //!     db.close().await;
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Example (DbManager API)
+//! ```rust,no_run
+//! use modkit_db::{DbManager, GlobalDatabaseConfig, DbConnConfig};
+//! use figment::{Figment, providers::Serialized};
+//! use std::path::PathBuf;
+//! use std::sync::Arc;
+//!
+//! // Create configuration using Figment
+//! let figment = Figment::new()
+//!     .merge(Serialized::defaults(serde_json::json!({
+//!         "db": {
+//!             "servers": {
+//!                 "main": {
+//!                     "host": "localhost",
+//!                     "port": 5432,
+//!                     "user": "app",
+//!                     "password": "${DB_PASSWORD}",
+//!                     "dbname": "app_db"
+//!                 }
+//!             }
+//!         },
+//!         "test_module": {
+//!             "database": {
+//!                 "server": "main",
+//!                 "dbname": "module_db"
+//!             }
+//!         }
+//!     })));
+//!
+//! // Create DbManager
+//! let home_dir = PathBuf::from("/app/data");
+//! let db_manager = Arc::new(DbManager::from_figment(figment, home_dir).unwrap());
+//!
+//! // Use in runtime with DbOptions::Manager(db_manager)
+//! // Modules can then use: ctx.db_required_async().await?
+//! ```
 
 // Re-export key types for public API
 pub use advisory_locks::{DbLockGuard, LockConfig};
-// Advisory locks module
+
+// Core modules
 pub mod advisory_locks;
+pub mod config;
+pub mod manager;
 pub mod odata;
+pub mod options;
+
+// Re-export important types from new modules
+pub use config::{DbConnConfig, GlobalDatabaseConfig, PoolCfg};
+pub use manager::DbManager;
+pub use options::{
+    build_db_handle, redact_credentials_in_dsn, ConnectionOptionsError, DbConnectOptions,
+};
 
 use std::time::Duration;
+
+// Used for parsing SQLite DSN query parameters
 
 #[cfg(feature = "mysql")]
 use sqlx::{mysql::MySqlPoolOptions, MySql, MySqlPool};
@@ -148,9 +171,6 @@ pub struct ConnectOpts {
     pub max_lifetime: Option<Duration>,
     /// Test connection health before acquire.
     pub test_before_acquire: bool,
-
-    /// SQLite-specific: busy timeout used via PRAGMA busy_timeout.
-    pub sqlite_busy_timeout: Option<Duration>,
     /// For SQLite file DSNs, create parent directories if missing.
     pub create_sqlite_dirs: bool,
 }
@@ -164,14 +184,13 @@ impl Default for ConnectOpts {
             max_lifetime: None,
             test_before_acquire: false,
 
-            sqlite_busy_timeout: Some(Duration::from_millis(5_000)),
             create_sqlite_dirs: true,
         }
     }
 }
 
 /// One concrete sqlx pool.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum DbPool {
     #[cfg(feature = "pg")]
     Postgres(PgPool),
@@ -226,6 +245,7 @@ impl<'a> DbTransaction<'a> {
 }
 
 /// Main handle.
+#[derive(Debug)]
 pub struct DbHandle {
     engine: DbEngine,
     pool: DbPool,
@@ -233,6 +253,8 @@ pub struct DbHandle {
     #[cfg(feature = "sea-orm")]
     sea: DatabaseConnection,
 }
+
+const DEFAULT_SQLITE_BUSY_TIMEOUT: i32 = 5000;
 
 impl DbHandle {
     /// Detect engine by DSN.
@@ -326,6 +348,13 @@ impl DbHandle {
             #[cfg(feature = "sqlite")]
             DbEngine::Sqlite => {
                 let dsn = prepare_sqlite_path(dsn, opts.create_sqlite_dirs)?;
+
+                // Parse pragma settings from DSN query parameters BEFORE removing them
+                let dsn_pragmas = parse_sqlite_pragmas_from_dsn(&dsn);
+
+                // Remove SQLite-specific parameters from DSN for SQLx connection
+                let clean_dsn = remove_sqlite_pragmas_from_dsn(&dsn);
+
                 let mut o = SqlitePoolOptions::new();
 
                 if let Some(n) = opts.max_conns {
@@ -347,33 +376,61 @@ impl DbHandle {
                     o = o.test_before_acquire(true);
                 }
 
-                // Copy busy timeout into the closure (per-connection PRAGMAs)
-                let busy = opts.sqlite_busy_timeout;
+                // Apply SQLite pragmas with special handling for in-memory databases
+                let dsn_for_check = clean_dsn.clone();
                 o = o.after_connect(move |conn, _meta| {
-                    let busy = busy;
+                    let pragmas = dsn_pragmas.clone();
+                    let dsn_check = dsn_for_check.clone();
                     Box::pin(async move {
-                        // Each call borrows `conn` mutably for the duration of the await,
-                        // without moving the &mut SqliteConnection itself.
-                        sqlx::query("PRAGMA journal_mode = WAL")
-                            .execute(&mut *conn)
-                            .await?;
-
-                        sqlx::query("PRAGMA synchronous = NORMAL")
-                            .execute(&mut *conn)
-                            .await?;
-
-                        if let Some(ms) = busy {
-                            // PRAGMA can't use bind parameters; use a numeric literal.
-                            let ms = std::cmp::min(ms.as_millis(), i64::MAX as u128) as i64;
-                            let stmt = format!("PRAGMA busy_timeout = {ms}");
+                        // Apply journal_mode (fixed for in-memory databases)
+                        if let Some(journal_mode) = pragmas.get("journal_mode") {
+                            let stmt = format!("PRAGMA journal_mode = {}", journal_mode);
                             sqlx::query(&stmt).execute(&mut *conn).await?;
+                        } else if let Some(wal_mode) = pragmas.get("wal") {
+                            let stmt = format!("PRAGMA journal_mode = {}", wal_mode);
+                            sqlx::query(&stmt).execute(&mut *conn).await?;
+                        } else {
+                            // Default journal mode depends on database type
+                            // In-memory databases don't support WAL mode properly
+                            if dsn_check.contains(":memory:") || dsn_check.contains("mode=memory") {
+                                sqlx::query("PRAGMA journal_mode = DELETE")
+                                    .execute(&mut *conn)
+                                    .await?;
+                            } else {
+                                sqlx::query("PRAGMA journal_mode = WAL")
+                                    .execute(&mut *conn)
+                                    .await?;
+                            }
+                        }
+
+                        // Apply synchronous mode if specified in params (default: NORMAL)
+                        if let Some(sync_mode) = pragmas.get("synchronous") {
+                            let stmt = format!("PRAGMA synchronous = {}", sync_mode);
+                            sqlx::query(&stmt).execute(&mut *conn).await?;
+                        } else {
+                            sqlx::query("PRAGMA synchronous = NORMAL")
+                                .execute(&mut *conn)
+                                .await?;
+                        }
+
+                        // Apply busy timeout (skip for in-memory databases)
+                        if !dsn_check.contains(":memory:") && !dsn_check.contains("mode=memory") {
+                            if let Some(timeout_str) = pragmas.get("busy_timeout") {
+                                let stmt = format!("PRAGMA busy_timeout = {timeout_str}");
+                                sqlx::query(&stmt).execute(&mut *conn).await?;
+                            } else {
+                                sqlx::query("PRAGMA busy_timeout = ?")
+                                    .bind(DEFAULT_SQLITE_BUSY_TIMEOUT)
+                                    .execute(&mut *conn)
+                                    .await?;
+                            }
                         }
 
                         Ok(())
                     })
                 });
 
-                let pool = o.connect(&dsn).await?;
+                let pool = o.connect(&clean_dsn).await?;
                 // No extra call to apply_sqlite_pragmas here anymore.
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
@@ -381,7 +438,7 @@ impl DbHandle {
                 Ok(Self {
                     engine,
                     pool: DbPool::Sqlite(pool),
-                    dsn: dsn.to_string(),
+                    dsn: clean_dsn,
                     #[cfg(feature = "sea-orm")]
                     sea,
                 })
@@ -410,6 +467,11 @@ impl DbHandle {
     /// Get the backend.
     pub fn engine(&self) -> DbEngine {
         self.engine
+    }
+
+    /// Get the DSN used for this connection.
+    pub fn dsn(&self) -> &str {
+        &self.dsn
     }
 
     // --- sqlx accessors ---
@@ -574,27 +636,6 @@ impl DbHandle {
 // ===================== helpers =====================
 
 #[cfg(feature = "sqlite")]
-#[allow(dead_code)]
-async fn apply_sqlite_pragmas(pool: &SqlitePool, busy: Option<Duration>) -> Result<()> {
-    // Sane defaults for app DBs; adjust to your needs.
-    sqlx::query("PRAGMA journal_mode = WAL")
-        .execute(pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL")
-        .execute(pool)
-        .await?;
-    if let Some(ms) = busy {
-        // Prefer bound parameter; ensure type fits into i64.
-        let ms = i64::try_from(ms.as_millis()).unwrap_or(i64::MAX);
-        sqlx::query("PRAGMA busy_timeout = ?")
-            .bind(ms)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "sqlite")]
 fn prepare_sqlite_path(dsn: &str, create_dirs: bool) -> Result<String> {
     // Only try to create directories for plain file paths; ignore :memory: cases.
     if !create_dirs || dsn.contains(":memory:") {
@@ -624,6 +665,154 @@ fn prepare_sqlite_path(dsn: &str, create_dirs: bool) -> Result<String> {
     Ok(dsn.to_string())
 }
 
+/// Remove SQLite-specific PRAGMA parameters from DSN for SQLx connection.
+/// SQLx doesn't understand these parameters, so we need to clean them before connecting.
+fn remove_sqlite_pragmas_from_dsn(dsn: &str) -> String {
+    // List of SQLite-specific parameters that need to be removed
+    const SQLITE_PRAGMA_PARAMS: &[&str] = &["wal", "synchronous", "busy_timeout", "journal_mode"];
+
+    if let Ok(mut url) = url::Url::parse(dsn) {
+        // Get current query parameters
+        let query_pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| {
+                // Keep parameters that are NOT in our SQLite pragma list
+                !SQLITE_PRAGMA_PARAMS.contains(&key.to_lowercase().as_str())
+            })
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+
+        // Clear all query parameters
+        url.set_query(None);
+
+        // Re-add only the non-SQLite parameters
+        if !query_pairs.is_empty() {
+            let mut query_parts = Vec::new();
+            for (key, value) in query_pairs {
+                query_parts.push(format!("{}={}", key, value));
+            }
+            url.set_query(Some(&query_parts.join("&")));
+        }
+
+        url.to_string()
+    } else {
+        // If URL parsing fails, return the original DSN
+        // This handles cases like plain file paths or other non-URL formats
+        dsn.to_string()
+    }
+}
+
+/// Parse and validate SQLite PRAGMA settings from DSN query parameters.
+/// Only accepts parameters from a strict whitelist and validates their values.
+/// Invalid parameters are logged as warnings but don't cause failures.
+fn parse_sqlite_pragmas_from_dsn(dsn: &str) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+
+    let mut pragmas = HashMap::new();
+
+    // Parse the DSN as a URL to extract query parameters
+    if let Ok(url) = url::Url::parse(dsn) {
+        for (key, value) in url.query_pairs() {
+            let key_lower = key.to_lowercase();
+            let value_str = value.to_string();
+
+            // Strict whitelist of allowed PRAGMA parameters
+            match key_lower.as_str() {
+                "wal" => {
+                    if let Some(validated) = validate_wal_pragma(&value_str) {
+                        pragmas.insert("wal".to_string(), validated);
+                    } else {
+                        tracing::warn!(
+                            "Invalid 'wal' PRAGMA value '{}' in DSN '{}', ignoring",
+                            value_str,
+                            dsn
+                        );
+                    }
+                }
+                "synchronous" => {
+                    if let Some(validated) = validate_synchronous_pragma(&value_str) {
+                        pragmas.insert("synchronous".to_string(), validated);
+                    } else {
+                        tracing::warn!(
+                            "Invalid 'synchronous' PRAGMA value '{}' in DSN '{}', ignoring",
+                            value_str,
+                            dsn
+                        );
+                    }
+                }
+                "busy_timeout" => {
+                    if let Some(validated) = validate_busy_timeout_pragma(&value_str) {
+                        pragmas.insert("busy_timeout".to_string(), validated.to_string());
+                    } else {
+                        tracing::warn!(
+                            "Invalid 'busy_timeout' PRAGMA value '{}' in DSN '{}', ignoring",
+                            value_str,
+                            dsn
+                        );
+                    }
+                }
+                "journal_mode" => {
+                    if let Some(validated) = validate_journal_mode_pragma(&value_str) {
+                        pragmas.insert("journal_mode".to_string(), validated);
+                    } else {
+                        tracing::warn!(
+                            "Invalid 'journal_mode' PRAGMA value '{}' in DSN '{}', ignoring",
+                            value_str,
+                            dsn
+                        );
+                    }
+                }
+                _ => {
+                    // Unknown parameters are silently ignored (not logged as warnings to avoid spam)
+                    tracing::debug!(
+                        "Unknown SQLite parameter '{}={}' in DSN '{}', ignoring",
+                        key,
+                        value_str,
+                        dsn
+                    );
+                }
+            }
+        }
+    }
+
+    pragmas
+}
+
+/// Validate WAL PRAGMA value.
+/// Accepts: "true", "false", "1", "0" (case-insensitive)
+/// Returns: "WAL" or "DELETE"
+fn validate_wal_pragma(value: &str) -> Option<String> {
+    match value.to_lowercase().as_str() {
+        "true" | "1" => Some("WAL".to_string()),
+        "false" | "0" => Some("DELETE".to_string()),
+        _ => None,
+    }
+}
+
+/// Validate synchronous PRAGMA value.
+/// Accepts: "OFF", "NORMAL", "FULL", "EXTRA" (case-insensitive)
+fn validate_synchronous_pragma(value: &str) -> Option<String> {
+    match value.to_uppercase().as_str() {
+        "OFF" | "NORMAL" | "FULL" | "EXTRA" => Some(value.to_uppercase()),
+        _ => None,
+    }
+}
+
+/// Validate busy_timeout PRAGMA value.
+/// Must be a positive integer in milliseconds.
+fn validate_busy_timeout_pragma(value: &str) -> Option<i64> {
+    value.parse::<i64>().ok().filter(|&timeout| timeout >= 0)
+}
+
+/// Validate journal_mode PRAGMA value.
+/// Accepts: "DELETE", "WAL", "MEMORY", "TRUNCATE", "PERSIST", "OFF" (case-insensitive)
+fn validate_journal_mode_pragma(value: &str) -> Option<String> {
+    match value.to_uppercase().as_str() {
+        "DELETE" | "WAL" | "MEMORY" | "TRUNCATE" | "PERSIST" | "OFF" => Some(value.to_uppercase()),
+        _ => None,
+    }
+}
+
 // ===================== tests =====================
 
 #[cfg(test)]
@@ -638,6 +827,39 @@ mod tests {
         let opts = ConnectOpts::default();
         let db = DbHandle::connect(dsn, opts).await?;
         assert_eq!(db.engine(), DbEngine::Sqlite);
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_connection_with_pragma_parameters() -> Result<()> {
+        // Test that SQLite connections work with PRAGMA parameters in DSN
+        let dsn = "sqlite::memory:?wal=true&synchronous=NORMAL&busy_timeout=5000&journal_mode=WAL";
+        let opts = ConnectOpts::default();
+        let db = DbHandle::connect(dsn, opts).await?;
+        assert_eq!(db.engine(), DbEngine::Sqlite);
+
+        // Verify that the stored DSN has been cleaned (SQLite parameters removed)
+        // Note: For memory databases, the DSN should still be sqlite::memory: after cleaning
+        assert!(db.dsn == "sqlite::memory:" || db.dsn.starts_with("sqlite::memory:"));
+
+        // Test that we can execute queries (confirming the connection works)
+        let pool = db.sqlx_sqlite().unwrap();
+        sqlx::query("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT INTO test (name) VALUES (?)")
+            .bind("test_value")
+            .execute(pool)
+            .await?;
+
+        let row: (i64, String) = sqlx::query_as("SELECT id, name FROM test WHERE id = 1")
+            .fetch_one(pool)
+            .await?;
+
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, "test_value");
+
         Ok(())
     }
 
@@ -753,5 +975,174 @@ mod tests {
         let db = DbHandle::connect(dsn, ConnectOpts::default()).await?;
         let _conn = db.sea();
         Ok(())
+    }
+
+    #[test]
+    fn test_pragma_validation_valid_values() {
+        // Test valid WAL pragma values
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?wal=true").get("wal"),
+            Some(&"WAL".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?wal=false").get("wal"),
+            Some(&"DELETE".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?wal=1").get("wal"),
+            Some(&"WAL".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?wal=0").get("wal"),
+            Some(&"DELETE".to_string())
+        );
+
+        // Test valid synchronous pragma values
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?synchronous=NORMAL").get("synchronous"),
+            Some(&"NORMAL".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?synchronous=full").get("synchronous"),
+            Some(&"FULL".to_string())
+        );
+
+        // Test valid busy_timeout pragma values
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?busy_timeout=5000").get("busy_timeout"),
+            Some(&"5000".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?busy_timeout=0").get("busy_timeout"),
+            Some(&"0".to_string())
+        );
+
+        // Test valid journal_mode pragma values
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?journal_mode=wal").get("journal_mode"),
+            Some(&"WAL".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?journal_mode=delete")
+                .get("journal_mode"),
+            Some(&"DELETE".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pragma_validation_invalid_values() {
+        // Test invalid WAL pragma values - should be ignored
+        assert!(!parse_sqlite_pragmas_from_dsn("sqlite://test.db?wal=invalid").contains_key("wal"));
+        assert!(!parse_sqlite_pragmas_from_dsn("sqlite://test.db?wal=2").contains_key("wal"));
+
+        // Test invalid synchronous pragma values - should be ignored
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?synchronous=INVALID")
+                .contains_key("synchronous")
+        );
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?synchronous=yes")
+                .contains_key("synchronous")
+        );
+
+        // Test invalid busy_timeout pragma values - should be ignored
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?busy_timeout=-1")
+                .contains_key("busy_timeout")
+        );
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?busy_timeout=abc")
+                .contains_key("busy_timeout")
+        );
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?busy_timeout=1.5")
+                .contains_key("busy_timeout")
+        );
+
+        // Test invalid journal_mode pragma values - should be ignored
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?journal_mode=invalid")
+                .contains_key("journal_mode")
+        );
+        assert!(
+            !parse_sqlite_pragmas_from_dsn("sqlite://test.db?journal_mode=true")
+                .contains_key("journal_mode")
+        );
+    }
+
+    #[test]
+    fn test_pragma_unknown_parameters_ignored() {
+        let pragmas =
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?unknown_param=value&foo=bar&wal=true");
+
+        // Valid parameter should be included
+        assert_eq!(pragmas.get("wal"), Some(&"WAL".to_string()));
+
+        // Unknown parameters should be ignored
+        assert!(!pragmas.contains_key("unknown_param"));
+        assert!(!pragmas.contains_key("foo"));
+    }
+
+    #[test]
+    fn test_pragma_case_insensitive_matching() {
+        // Test case-insensitive parameter names
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?WAL=true").get("wal"),
+            Some(&"WAL".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?Synchronous=Normal").get("synchronous"),
+            Some(&"NORMAL".to_string())
+        );
+        assert_eq!(
+            parse_sqlite_pragmas_from_dsn("sqlite://test.db?JOURNAL_MODE=wal").get("journal_mode"),
+            Some(&"WAL".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pragma_multiple_parameters() {
+        let pragmas = parse_sqlite_pragmas_from_dsn(
+            "sqlite://test.db?wal=true&synchronous=FULL&busy_timeout=10000&journal_mode=DELETE&unknown=ignored"
+        );
+
+        assert_eq!(pragmas.get("wal"), Some(&"WAL".to_string()));
+        assert_eq!(pragmas.get("synchronous"), Some(&"FULL".to_string()));
+        assert_eq!(pragmas.get("busy_timeout"), Some(&"10000".to_string()));
+        assert_eq!(pragmas.get("journal_mode"), Some(&"DELETE".to_string()));
+        assert!(!pragmas.contains_key("unknown"));
+    }
+
+    #[test]
+    fn test_remove_sqlite_pragmas_from_dsn() {
+        // Test removing SQLite-specific parameters while keeping others
+        let original_dsn = "sqlite://test.db?wal=true&synchronous=NORMAL&busy_timeout=5000&journal_mode=WAL&mode=rwc&cache=shared";
+        let clean_dsn = remove_sqlite_pragmas_from_dsn(original_dsn);
+
+        // Should keep SQLx-compatible parameters but remove SQLite-specific ones
+        assert!(clean_dsn.contains("mode=rwc"));
+        assert!(clean_dsn.contains("cache=shared"));
+        assert!(!clean_dsn.contains("wal=true"));
+        assert!(!clean_dsn.contains("synchronous=NORMAL"));
+        assert!(!clean_dsn.contains("busy_timeout=5000"));
+        assert!(!clean_dsn.contains("journal_mode=WAL"));
+
+        // Test DSN with only SQLite parameters (should have no query string)
+        let sqlite_only_dsn = "sqlite://test.db?wal=true&synchronous=NORMAL&busy_timeout=5000";
+        let clean_sqlite_dsn = remove_sqlite_pragmas_from_dsn(sqlite_only_dsn);
+        assert_eq!(clean_sqlite_dsn, "sqlite://test.db");
+
+        // Test DSN with no parameters
+        let no_params_dsn = "sqlite://test.db";
+        let clean_no_params = remove_sqlite_pragmas_from_dsn(no_params_dsn);
+        assert_eq!(clean_no_params, "sqlite://test.db");
+
+        // Test case insensitive parameter removal
+        let case_dsn = "sqlite://test.db?WAL=true&Synchronous=NORMAL&BUSY_TIMEOUT=5000&mode=rwc";
+        let clean_case_dsn = remove_sqlite_pragmas_from_dsn(case_dsn);
+        assert!(clean_case_dsn.contains("mode=rwc"));
+        assert!(!clean_case_dsn.contains("WAL=true"));
+        assert!(!clean_case_dsn.contains("Synchronous=NORMAL"));
+        assert!(!clean_case_dsn.contains("BUSY_TIMEOUT=5000"));
     }
 }

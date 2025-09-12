@@ -11,7 +11,7 @@ members = [
  "libs/runtime",
  "libs/modkit",
  "libs/modkit/macros",
- "libs/db",
+ "libs/modkit-db",
  "libs/odata-core",
  "modules/api_ingress",
  "examples/modkit/users_info"
@@ -68,3 +68,14 @@ file-rotate = "0.8"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+
+# DSN parsing
+dsn = "0.2"
+humantime-serde = "1.1"
+
+# URL parsing
+url = "2.5"
+urlencoding = "2.1"
+
+# Regex for env expansion
+regex = "1.10"

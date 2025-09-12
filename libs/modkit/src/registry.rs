@@ -9,7 +9,7 @@ use thiserror::Error;
 // Re-exported contracts are referenced but not defined here.
 use crate::context;
 use crate::contracts;
-use db;
+use modkit_db;
 
 /// Type alias for REST host module configuration.
 type RestHostEntry = (&'static str, Arc<dyn contracts::RestHostModule>);
@@ -87,7 +87,7 @@ impl ModuleRegistry {
         Ok(())
     }
 
-    pub async fn run_db_phase(&self, db: &db::DbHandle) -> Result<(), RegistryError> {
+    pub async fn run_db_phase(&self, db: &modkit_db::DbHandle) -> Result<(), RegistryError> {
         for e in &self.modules {
             if let Some(dbm) = &e.db {
                 // If you want advisory locks, do it here (kept minimal for portability):

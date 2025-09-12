@@ -14,7 +14,7 @@ pub trait Module: Send + Sync + 'static {
 #[async_trait]
 pub trait DbModule: Send + Sync {
     /// Runs AFTER init, BEFORE REST/start.
-    async fn migrate(&self, db: &db::DbHandle) -> anyhow::Result<()>;
+    async fn migrate(&self, db: &modkit_db::DbHandle) -> anyhow::Result<()>;
 }
 
 /// Pure wiring; must be sync. Runs AFTER DB migrations.
