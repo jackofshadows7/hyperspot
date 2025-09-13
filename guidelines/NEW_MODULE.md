@@ -30,7 +30,7 @@ Modules follow a DDD-light architecture to ensure a clean separation of concerns
 All modules MUST adhere to the following directory structure:
 
 ```
-modules/<name>/
+modules/<your-module>/
   src/
     lib.rs              # Public exports (contract, module type), hides internals
     module.rs           # Module struct, #[modkit::module], and trait impls
@@ -76,10 +76,11 @@ modules/<name>/
 
 > Note: Strictly mirror the style, naming, and structure of the `examples/modkit/users_info/` reference when generating code.
 
+
 ### Step 1: Project & Cargo Setup
 
 1.  **Create `Cargo.toml`:**
-    -   **Rule:** Dependencies and features MUST mirror the canonical `users_info` example to ensure workspace compatibility.
+    **Rule:** Dependencies and features MUST mirror the canonical `users_info` example to ensure workspace compatibility.
 
     ```toml
     [package]
@@ -116,7 +117,7 @@ modules/<name>/
 
 2.  **Create `src/lib.rs`:**
 
-    -   **Rule:** The public API surface MUST be limited to the `contract` and the main module type. All other modules (`api`, `domain`, `infra`, etc.) MUST be marked with `#[doc(hidden)]`.
+    **Rule:** The public API surface MUST be limited to the `contract` and the main module type. All other modules (`api`, `domain`, `infra`, etc.) MUST be marked with `#[doc(hidden)]`.
 
     ```rust
     // === PUBLIC CONTRACT ===
@@ -135,14 +136,187 @@ modules/<name>/
     #[doc(hidden)] pub mod infra;
     ```
 
-### Step 2: Contract Layer (Public API)
+
+### Step 2: Data types naming matrix
+
+**Rule:** Use the following naming matrix for your data types:
+
+| Operation            | DB Layer (sqlx/SeaORM)<br/>`src/infra/storage/entity.rs`                                    | Domain Layer (contract model)<br/>`src/contract/model.rs`                      | API Request (in)<br/>`src/api/rest/dto.rs`                         | API Response (out)<br/>`src/api/rest/dto.rs`                           |
+|----------------------|------------------------------------------------------------|---------------------------------------------------|------------------------------------------|----------------------------------------------|
+| Create               | NewUserEntity / ActiveModel | NewUser              | CreateUserRequest      | UserResponse       |
+| Read/Get by id       | UserEntity              | User                  | Path params (id)<br/>`routes.rs` registers path  | UserResponse       |
+| List/Query           | UserEntity (rows)        | User (Vec/User iterator) | ListUsersQuery (filter+page) | UserListResponse or Page<UserView> |
+| Update (PUT, full)   | UserEntity (update query) | UpdatedUser (optional) | UpdateUserRequest      | UserResponse       |
+| Patch (PATCH, partial) | UserPatchEntity (optional) | UserPatch            | PatchUserRequest       | UserResponse       |
+| Delete               | (no payload)                                               | DeleteUser (optional command) | Path params (id)<br/>`routes.rs` registers path  | NoContent (204) or DeleteUserResponse (rare)<br/>`handlers.rs` return type + `error.rs` mapping |
+| Search (text)        | UserSearchEntity (projection) | UserSearchHit         | SearchUsersQuery      | SearchUsersResponse (hits + meta) |
+| Projection/View      | UserAggEntity / UserSummaryEntity | UserSummary           | (n/a)                                      | UserSummaryView    |
+
+Notes:
+- Keep all transport-agnostic types in `src/contract/model.rs`. Handlers and DTOs must not leak into `contract`.
+- SeaORM entities live in `src/infra/storage/entity.rs` (or submodules). Repository queries go in `src/infra/storage/repositories.rs`.
+- All REST DTOs (requests/responses/views) live in `src/api/rest/dto.rs`; provide `From` conversions in `src/api/rest/mapper.rs`.
+
+
+### Step 3: Errors management
+
+#### Errors definition
+
+**Rule:** Use the following naming and placement matrix for error types and mappings:
+
+| Concern                          | Type/Concept                          | File (must define)                 | Notes |
+|----------------------------------|---------------------------------------|------------------------------------|-------|
+| Domain error (business)          | `DomainError`                         | `src/domain/error.rs`              | Pure business errors; no transport details. Variants reflect domain invariants (e.g., `UserNotFound`, `EmailAlreadyExists`, `InvalidEmail`). |
+| Contract error (public)          | `<ModuleName>Error`                   | `src/contract/error.rs`            | Transport-agnostic surface for other modules. Provide `From<DomainError> for <ModuleName>Error`. No `serde` derives. |
+| REST mapping function            | `map_domain_error(...) -> ProblemResponse` | `src/api/rest/error.rs`            | Centralize RFC-9457 mapping: choose status, title, detail; include `.with_instance(path)`. |
+| Handler usage                    | `map_domain_error(&e, uri.path())`    | `src/api/rest/handlers.rs`         | Always map errors via the centralized function; return `ProblemResponse`. |
+| OpenAPI responses registration   | `.problem_response(openapi, <status>, <desc>)` | `src/api/rest/routes.rs`      | Register all error statuses your handler can return to keep OpenAPI in sync. |
+
+Error design rules:
+- Use situation-specific error structs (not mega-enums); include `Backtrace` where helpful.
+- Provide convenience `is_xxx()` helper methods on error types.
+
+Recommended error variant mapping (example for Users):
+
+| DomainError variant         | Contract error variant       | HTTP status | Problem title               | Detail                                       |
+|-----------------------------|------------------------------|-------------|-----------------------------|----------------------------------------------|
+| `UserNotFound(id)`          | `NotFound(id)`               | 404         | "User not found"           | `No user with id {id}`                       |
+| `EmailAlreadyExists(email)` | `EmailConflict(email)`       | 409         | "Conflict"                 | `Email already exists: {email}`              |                       |                       |
+
+Minimal templates:
+
+```rust
+// src/domain/error.rs
+#[derive(Debug, thiserror::Error)]
+pub enum DomainError {
+    #[error("User not found: {0}")] UserNotFound(uuid::Uuid),
+    #[error("Email already exists: {0}")] EmailAlreadyExists(String),
+}
+```
+
+```rust
+// src/contract/error.rs
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UsersInfoError {
+    #[error("User not found with ID: {0}")] NotFound(uuid::Uuid),
+    #[error("Email already exists: {0}")] EmailConflict(String),
+}
+
+impl From<crate::domain::error::DomainError> for UsersInfoError {
+    fn from(e: crate::domain::error::DomainError) -> Self {
+        match e {
+            crate::domain::error::DomainError::UserNotFound(id) => Self::NotFound(id),
+            crate::domain::error::DomainError::EmailAlreadyExists(email) => Self::EmailConflict(email),        }
+    }
+}
+```
+
+```rust
+// src/api/rest/error.rs
+use modkit::api::problem::{Problem, ProblemResponse};
+use crate::contract::error::UsersInfoError;
+
+/// Helper to create a ProblemResponse with less boilerplate
+pub fn from_parts(
+    status: StatusCode,
+    code: &str,
+    title: &str,
+    detail: impl Into<String>,
+    instance: &str,
+) -> ProblemResponse {
+    let problem = Problem::new(status, title, detail)
+        .with_type(format!("https://errors.hyperspot.com/{}", code))
+        .with_code(code)
+        .with_instance(instance);
+
+    // Add request ID from current tracing span if available
+    let problem = if let Some(id) = tracing::Span::current().id() {
+        problem.with_trace_id(id.into_u64().to_string())
+    } else {
+        problem
+    };
+
+    ProblemResponse(problem)
+}
+
+pub fn map_domain_error(err: &UsersInfoError, instance_path: &str) -> ProblemResponse {
+    match err {
+        UsersInfoError::NotFound(id) => from_parts(
+            StatusCode::NOT_FOUND,
+            "USERS_NOT_FOUND",
+            "User not found",
+            format!("No user with id {}", id),
+            instance_path,
+        ),
+        UsersInfoError::EmailConflict(email) => from_parts(
+            StatusCode::CONFLICT,
+            "USERS_EMAIL_CONFLICT",
+            "Email already exists",
+            format!("Email already exists: {}", email),
+            instance_path,
+        ),
+    }
+}
+```
+
+#### The Problem object usage
+
+**Rule:** Always use the Problem object to create ProblemResponse objects.
+
+**Rule:** The Problem object creation:
+
+```rust
+let problem = Problem::new(status_code, title, detail)
+    .with_type(format!("https://errors.hyperspot.com/{}", code))
+    .with_code(code)
+    .with_instance(instance_path);
+
+// Add tracing span ID if available
+let problem = if let Some(id) = tracing::Span::current().id() {
+    problem.with_trace_id(id.into_u64().to_string())
+} else {
+    problem
+};
+
+ProblemResponse(problem)
+```
+
+#### Error Conversion Chain
+
+**Rule:** Always convert domain errors to contract errors before mapping to REST:
+
+```rust
+// In handlers.rs - CORRECT pattern
+.map_err(|e: DomainError| map_domain_error(&e.into(), uri.path()))?
+
+// Or with explicit type annotation when compiler needs help
+.map_err(|e: SysCapError| map_domain_error(&e, uri.path()))?
+```
+
+Checklist:
+- Provide `From<DomainError> for <Module>Error`.
+- Use `map_domain_error` in all handlers.
+- Register `.problem_response(openapi, 400/404/409/500, ...)` for each route as applicable.
+- Keep all contract errors free of `serde` and any transport specifics.
+- Validation errors SHOULD use `422 Unprocessable Entity` when applicable; otherwise use `400 Bad Request`.
+- **Always use the `from_parts` helper function for consistent Problem creation**.
+
+
+### Step 4: Contract Layer (Public API for Rust clients)
 
 This layer defines the transport-agnostic interface for your module.
+
+Contract API design rules:
+- Do not expose smart pointers (`Arc<T>`, `Box<T>`) in public APIs.
+- Accept `impl AsRef<str>` instead of `&str` for flexibility.
+- Accept `impl AsRef<Path>` for file paths.
+- Use inherent methods for core functionality; use traits for extensions.
+- Public contract types MUST implement `Debug`. Types intended for display SHOULD implement `Display`.
 
 1.  **Clean Contract**: `contract` models and errors MUST NOT have `serde` or any other transport-specific derives.
 
 2.  **`src/contract/model.rs`:**
-    -   **Rule:** Contract models MUST NOT have `serde` or any other transport-specific derives. They are plain Rust structs for inter-module communication.
+    **Rule:** Contract models MUST NOT have `serde` or any other transport-specific derives. They are plain Rust structs for inter-module communication.
 
     ```rust
     // Example from users_info
@@ -157,7 +331,7 @@ This layer defines the transport-agnostic interface for your module.
     ```
 
 3.  **`src/contract/error.rs`:**
-    -   **Rule:** Define a domain-specific error enum for the contract. This allows other modules to handle your errors without depending on implementation details.
+    **Rule:** Define a domain-specific error enum for the contract. This allows other modules to handle your errors without depending on implementation details.
 
     ```rust
     // Example from users_info
@@ -187,7 +361,7 @@ This layer defines the transport-agnostic interface for your module.
     ```
 
 4.  **`src/contract/client.rs`:**
-    -   **Rule:** Define a native, async trait for the ClientHub. This is the primary way other modules will interact with your service. Name it `<PascalCaseModule>Api`.
+    **Rule:** Define a native, async trait for the ClientHub. This is the primary way other modules will interact with your service. Name it `<PascalCaseModule>Api`.
 
     ```rust
     // Example from users_info
@@ -198,74 +372,13 @@ This layer defines the transport-agnostic interface for your module.
     }
     ```
 
-### Step 3: API Layer (REST)
 
-This layer adapts HTTP requests to domain calls.
+### Step 5: Domain Layer
 
-> Note:
-> - Do NOT implement a REST host. `api_ingress` owns the Axum server and OpenAPI. Modules only register routes via `register_routes(...)`.
-> - Use dependency injection with `Extension<Arc<Service>>` in handlers and attach the service ONCE after all routes are registered: `router = router.layer(Extension(service.clone()));`.
-> - Follow the `<crate>.<resource>.<action>` convention for `operation_id` naming.
-
-1.  **`src/api/rest/dto.rs`:**
-    -   **Rule:** Create Data Transfer Objects (DTOs) for the REST API. These structs derive `serde` and `utoipa::ToSchema`.
-    -   **Rule:** Map OpenAPI types correctly: `string: uuid` -> `uuid::Uuid`, `string: date-time` -> `chrono::DateTime<chrono::Utc>`.
-
-2.  **`src/api/rest/mapper.rs`:**
-    -   **Rule:** Provide `From` implementations to convert between DTOs and `contract` models.
-
-2.  **`src/api/rest/handlers.rs`:**
-    -   **Rule:** Handlers must be thin. They extract data, call the domain service, and map results.
-    -   **Rule:** Use `Extension<Arc<Service>>` for dependency injection.
-    -   **Rule:** Handler return types must match the canonical patterns:
-        -   `GET` -> `Result<Json<T>, ProblemResponse>`
-        -   `POST` -> `Result<(StatusCode, Json<T>), ProblemResponse>`
-        -   `DELETE/PUT (no body)` -> `Result<StatusCode, ProblemResponse>`
-
-    ```rust
-    // Example from users_info
-    pub async fn get_user(
-        Extension(svc): Extension<std::sync::Arc<Service>>,
-        axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
-        uri: axum::http::Uri,
-    ) -> Result<axum::Json<super::dto::UserDto>, modkit::api::problem::ProblemResponse> {
-        let user = svc.get_user(id).await.map_err(|e| super::error::map_domain_error(&e, uri.path()))?;
-        Ok(axum::Json(user.into()))
-    }
-    ```
-
-3.  **`src/api/rest/routes.rs`:**
-    -   **Rule:** Register ALL endpoints in a single `register_routes` function.
-    -   **Rule:** Use `OperationBuilder` for every route, following the strict order: describe -> handler -> responses -> register.
-    -   **Rule:** After all routes are registered, attach the service ONCE with `router.layer(Extension(service.clone()))`.
-
-    ```rust
-    // Example from users_info
-    pub fn register_routes(
-        mut router: axum::Router,
-        openapi: &dyn modkit::api::OpenApiRegistry,
-        service: std::sync::Arc<Service>,
-    ) -> anyhow::Result<axum::Router> {
-        router = modkit::api::OperationBuilder::<_, _, ()>::get("/users/{id}")
-            .operation_id("users_info.get_user")
-            .handler(super::handlers::get_user)
-            .json_response_with_schema::<super::dto::UserDto>(openapi, 200, "OK")
-            .problem_response(openapi, 404, "Not Found")
-            .register(router, openapi);
-
-        // ... other routes
-
-        router = router.layer(axum::Extension(service.clone()));
-        Ok(router)
-    }
-    ```
-
-### Step 4: Domain Layer
-
-This layer contains the core business logic, free from infrastructure concerns.
+This layer contains the core business logic, free from API specifics andinfrastructure concerns.
 
 1.  **`src/domain/events.rs`:**
-    -   **Rule:** Define transport-agnostic domain events for important business actions.
+    **Rule:** Define transport-agnostic domain events for important business actions.
 
     ```rust
     // Example from users_info
@@ -278,7 +391,7 @@ This layer contains the core business logic, free from infrastructure concerns.
     ```
 
 2.  **`src/domain/ports.rs`:**
-    -   **Rule:** Define output ports (interfaces) for external concerns like event publishing.
+    **Rule:** Define output ports (interfaces) for external concerns like event publishing.
 
     ```rust
     // Example from users_info
@@ -288,7 +401,9 @@ This layer contains the core business logic, free from infrastructure concerns.
     ```
 
 3.  **`src/domain/repository.rs`:**
-    -   **Rule:** Define repository traits (ports) that the service will depend on. This decouples the domain from the database implementation.
+    **Rule:** Define repository traits (ports) that the service will depend on. This decouples the domain from the database implementation.
+
+    **Rule:** For ranged queries, prefer accepting `impl core::ops::RangeBounds<T>` parameters to make callers flexible while keeping type safety.
 
     ```rust
     // Example from users_info
@@ -297,11 +412,18 @@ This layer contains the core business logic, free from infrastructure concerns.
         async fn find_by_id(&self, id: uuid::Uuid) -> anyhow::Result<Option<crate::contract::model::User>>;
         async fn email_exists(&self, email: &str) -> anyhow::Result<bool>;
         // ... other data access methods
+        // Example of ranged queries using RangeBounds
+        async fn list_by_created_at<R>(
+            &self,
+            range: R,
+        ) -> anyhow::Result<Vec<crate::contract::model::User>>
+        where
+            R: core::ops::RangeBounds<chrono::DateTime<chrono::Utc>> + Send;
     }
     ```
 
 4.  **`src/domain/service.rs`:**
-    -   **Rule:** The `Service` struct encapsulates all business logic. It depends on repository traits and event publishers, not concrete implementations.
+    **Rule:** The `Service` struct encapsulates all business logic. It depends on repository traits and event publishers, not concrete implementations.
 
     ```rust
     // Example from users_info
@@ -338,40 +460,6 @@ This layer contains the core business logic, free from infrastructure concerns.
     }
     ```
 
-### Step 5: Infra Layer (Storage)
-
-If no database requred Skip `DbModule`, remove `db` from capabilities
-
-This layer implements the domain's repository traits.
-
-1.  **`src/infra/storage/repositories.rs`:**
-    -   **Rule:** Implement the repository trait using SeaORM. The implementation should be generic over `C: ConnectionTrait` to support both direct connections and transactions.
-
-    ```rust
-    // Example from users_info
-    use sea_orm::{ConnectionTrait, EntityTrait};
-
-    pub struct SeaOrmUsersRepository<C> where C: ConnectionTrait + Send + Sync {
-        conn: C,
-    }
-
-    impl<C> SeaOrmUsersRepository<C> where C: ConnectionTrait + Send + Sync {
-        pub fn new(conn: C) -> Self { Self { conn } }
-    }
-
-    #[async_trait::async_trait]
-    impl<C> crate::domain::repository::UsersRepository for SeaOrmUsersRepository<C>
-    where C: ConnectionTrait + Send + Sync + 'static {
-        async fn find_by_id(&self, id: uuid::Uuid) -> anyhow::Result<Option<crate::contract::model::User>> {
-            let found = super::entity::Entity::find_by_id(id).one(&self.conn).await?;
-            Ok(found.map(Into::into))
-        }
-        // ... other implementations
-    }
-    ```
-
-2.  **`src/infra/storage/migrations/`:**
-    -   **Rule:** Create a SeaORM migrator. This is mandatory for any module with the `db` capability.
 
 ### Step 6: Module Wiring & Lifecycle
 
@@ -403,20 +491,37 @@ The `init` function receives a `ModuleCtx` struct, which provides access to esse
 This is where all components are assembled and registered with ModKit.
 
 1.  **`src/module.rs` - The `#[modkit::module]` macro:**
-    -   **Rule:** The module MUST declare `capabilities = [db, rest]`.
-    -   **Rule:** The `client` property MUST be set to the path of your native client trait (e.g., `crate::contract::client::UsersInfoApi`).
+    **Rule:** The module MUST declare `capabilities = [db, rest]`.
+    **Rule:** The `client` property MUST be set to the path of your native client trait (e.g., `crate::contract::client::UsersInfoApi`).
+    **Checklist:** Ensure `capabilities`, `deps`, and `client` are set correctly for your module.
 
 2.  **`src/module.rs` - `impl Module for YourModule`:**
-    -   **Rule:** The `init` function is the composition root. It MUST:
+    **Rule:** The Module trait requires implementing `as_any()` method:
+
+    ```rust
+    impl Module for YourModule {
+        fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+            self
+        }
+
+        async fn init(&self, ctx: &ModuleCtx) -> anyhow::Result<()> {
+            // ... init logic
+        }
+    }
+    ```
+
+    **Rule:** The `init` function is the composition root. It MUST:
         1.  Read the typed config: `let cfg: Config = ctx.module_config();`
         2.  Get a DB handle and fail if it's missing: `let db = ctx.db().ok_or_else(...)`.
         3.  Instantiate the repository, service, and any other dependencies.
         4.  Store the `Arc<Service>` in a thread-safe container like `arc_swap::ArcSwapOption`.
         5.  Instantiate and expose the native client to the `ClientHub` using the generated `expose_<module_name>_client` function.
+        6.  Config structs SHOULD use `#[serde(deny_unknown_fields)]` and provide safe defaults.
+        7.  If the module declares the `db` capability, requiring a DB handle is mandatory; fail fast when missing.
 
 3.  **`src/module.rs` - `impl DbModule` and `impl RestfulModule`:**
-    -   **Rule:** `DbModule::migrate` MUST be implemented to run your SeaORM migrations.
-    -   **Rule:** `RestfulModule::register_rest` MUST fail if the service is not yet initialized, then call your single `register_routes` function.
+    **Rule:** `DbModule::migrate` MUST be implemented to run your SeaORM migrations.
+    **Rule:** `RestfulModule::register_rest` MUST fail if the service is not yet initialized, then call your single `register_routes` function.
 
 ```rust
 // Example from users_info/src/module.rs
@@ -473,14 +578,221 @@ impl RestfulModule for UsersInfo {
 }
 ```
 
-### Step 7: SSE Integration (Optional)
+#### Module Integration into the Hyperspot Binary
+
+Your module must be integrated into the hyperspot-server binary to be loaded at runtime.
+
+Edit `apps/hyperspot-server/Cargo.toml`:
+
+```toml
+[dependencies]
+# ... existing dependencies
+api_ingress = { path = "../../modules/api_ingress"}
+your_module = { path = "../../modules/your-module"}  # Add this line
+```
+
+#### 2. Link module in main.rs
+Edit `apps/hyperspot-server/src/main.rs` in the `_ensure_modules_linked()` function:
+
+```rust
+// Ensure modules are linked and registered via inventory
+#[allow(dead_code)]
+fn _ensure_modules_linked() {
+    // Make sure all modules are linked
+    let _ = std::any::type_name::<api_ingress::ApiIngress>();
+    let _ = std::any::type_name::<your_module::YourModule>();  // Add this line
+    #[cfg(feature = "users-info-example")]
+    let _ = std::any::type_name::<users_info::UsersInfo>();
+}
+```
+
+**Note:** Replace `your_module` with your actual module name and `YourModule` with your module struct name.
+
+
+### Step 7: REST API Layer (Optional)
+
+This layer adapts HTTP requests to domain calls. It is required only for modules exposing it's own REST API to UI or external API clients.
+
+#### Common principles
+
+1. **Follow the rules below:**
+**Rule:** Strictly follow the [API guideline](./API_GUIDELINE.md).
+**Rule:** Do NOT implement a REST host. `api_ingress` owns the Axum server and OpenAPI. Modules only register routes via `register_routes(...)`.
+**Rule:** Use dependency injection with `Extension<Arc<Service>>` in handlers and attach the service ONCE after all routes are registered: `router = router.layer(Extension(service.clone()));`.
+**Rule:** Follow the `<crate>.<resource>.<action>` convention for `operation_id` naming.
+**Rule:** Always return RFC 9457 Problem Details for all 4xx/5xx errors via `ProblemResponse` (centralized in `api/rest/error.rs`).
+**Rule:** Observability is provided by ingress: request tracing and `X-Request-Id` are already handled. Handlers can access the request path (`uri.path()`) for `Problem.instance` and should use `tracing` for logs; do not set tracing headers manually.
+**Rule:** Do not add transport middlewares (CORS, timeouts, compression, body limits) at module level — these are applied globally by `api_ingress`.
+**Rule:** If you implement optimistic concurrency, honor `If-Match` with ETags and return `412 Precondition Failed` on mismatch. Otherwise, omit concurrency headers entirely.
+**Rule:** Do not implement rate limiting or quota headers in modules; these are applied upstream (ingress/reverse proxy). Avoid setting cache headers from handlers; default caching is managed at the gateway.
+**Rule:** Handlers should complete within ~30s (ingress timeout). If work may exceed that, return `202 Accepted` and model it as an async job (see Step 9 for SSE/long-running patterns).
+
+2.  **`src/api/rest/dto.rs`:**
+    **Rule:** Create Data Transfer Objects (DTOs) for the REST API. These structs derive `serde` and `utoipa::ToSchema`.
+    **Rule:** Map OpenAPI types correctly: `string: uuid` -> `uuid::Uuid`, `string: date-time` -> `chrono::DateTime<chrono::Utc>`.
+
+3.  **`src/api/rest/mapper.rs`:**
+    **Rule:** Provide `From` implementations to convert between DTOs and `contract` models.
+
+4.  **`src/api/rest/handlers.rs`:**
+    **Rule:** Handlers must be thin. They extract data, call the domain service, and map results.
+    **Rule:** Use `Extension<Arc<Service>>` for dependency injection.
+    **Rule:** Handler return types must match the canonical patterns:
+        -   `GET` -> `Result<Json<T>, ProblemResponse>`
+        -   `POST` -> `Result<(StatusCode, Json<T>), ProblemResponse>`
+        -   `DELETE/PUT (no body)` -> `Result<StatusCode, ProblemResponse>`
+
+    **Rule:** For file uploads, accept streaming bodies using `impl tokio::io::AsyncRead` (or `axum::body::Body` adapters) to avoid buffering the entire file in memory.
+
+    ```rust
+    // Example from users_info
+    pub async fn get_user(
+        Extension(svc): Extension<std::sync::Arc<Service>>,
+        axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
+        uri: axum::http::Uri,
+    ) -> Result<axum::Json<super::dto::UserDto>, modkit::api::problem::ProblemResponse> {
+        let user = svc.get_user(id).await.map_err(|e| super::error::map_domain_error(&e, uri.path()))?;
+        Ok(axum::Json(user.into()))
+    }
+    ```
+
+    ```rust
+    // Example: file upload handler signature (streaming)
+    use tokio::io::AsyncRead;
+    pub async fn upload_avatar<R>(
+        Extension(svc): Extension<std::sync::Arc<Service>>,
+        reader: R,
+    ) -> Result<axum::http::StatusCode, modkit::api::problem::ProblemResponse>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        // stream reader to storage ...
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    }
+    ```
+
+5.  **`src/api/rest/routes.rs`:**
+    **Rule:** Register ALL endpoints in a single `register_routes` function.
+    **Rule:** Use `OperationBuilder` for every route, following the strict order: describe -> handler -> responses -> register.
+    **Rule:** Register all applicable error responses, including `422 Unprocessable Entity` for validation errors when used.
+    **Rule:** After all routes are registered, attach the service ONCE with `router.layer(Extension(service.clone()))`.
+
+    ```rust
+    // Example from users_info
+    pub fn register_routes(
+        mut router: axum::Router,
+        openapi: &dyn modkit::api::OpenApiRegistry,
+        service: std::sync::Arc<Service>,
+    ) -> anyhow::Result<axum::Router> {
+        // GET endpoint
+        router = modkit::api::OperationBuilder::<_, _, ()>::get("/users/{id}")
+            .operation_id("users_info.get_user")
+            .handler(super::handlers::get_user)
+            .json_response_with_schema::<super::dto::UserDto>(openapi, 200, "OK")
+            .problem_response(openapi, 404, "Not Found")
+            .register(router, openapi);
+
+        // POST endpoint - CRITICAL: Use .json_request::<DTO>() not .json_request_schema()
+        router = modkit::api::OperationBuilder::<_, _, ()>::post("/users")
+            .operation_id("users_info.create_user")
+            .summary("Create a new user")
+            .description("Create a new user with the provided information")
+            .tag("users")
+            .json_request::<super::dto::CreateUserReq>(openapi, "User creation data")
+            .handler(super::handlers::create_user)
+            .json_response_with_schema::<super::dto::UserDto>(openapi, 201, "Created")
+            .problem_response(openapi, 400, "Bad Request")
+            .problem_response(openapi, 409, "Conflict")
+            .register(router, openapi);
+
+        // PUT endpoint
+        router = modkit::api::OperationBuilder::<_, _, ()>::put("/users/{id}")
+            .operation_id("users_info.update_user")
+            .path_param("id", "User UUID")
+            .json_request::<super::dto::UpdateUserReq>(openapi, "User update data")
+            .handler(super::handlers::update_user)
+            .json_response_with_schema::<super::dto::UserDto>(openapi, 200, "Updated")
+            .problem_response(openapi, 400, "Bad Request")
+            .problem_response(openapi, 404, "Not Found")
+            .register(router, openapi);
+
+        // DELETE endpoint
+        router = modkit::api::OperationBuilder::<_, _, ()>::delete("/users/{id}")
+            .operation_id("users_info.delete_user")
+            .path_param("id", "User UUID")
+            .handler(super::handlers::delete_user)
+            .json_response(204, "User deleted successfully")
+            .problem_response(openapi, 404, "Not Found")
+            .register(router, openapi);
+
+        router = router.layer(axum::Extension(service.clone()));
+        Ok(router)
+    }
+    ```
+
+#### OpenAPI Schema Registration for POST/PUT/DELETE
+
+**CRITICAL:** For endpoints that accept request bodies, you MUST use `.json_request::<DTO>()` to properly register the schema:
+
+```rust
+// CORRECT - Registers the DTO schema automatically
+.json_request::<super::dto::CreateUserReq>(openapi, "Description")
+
+// WRONG - Will cause "Invalid reference token" errors
+.json_request_schema("CreateUserReq", "Description")
+```
+
+**Route Registration Patterns:**
+- **GET**: `.json_response_with_schema::<ResponseDTO>()`
+- **POST**: `.json_request::<RequestDTO>()` + `.json_response_with_schema::<ResponseDTO>(openapi, 201, "Created")`
+- **PUT**: `.json_request::<RequestDTO>()` + `.json_response_with_schema::<ResponseDTO>(openapi, 200, "Updated")`
+- **DELETE**: `.json_response(204, "Deleted")` (no request/response body typically)
+
+
+### Step 8: Infra/Storage Layer (Optional)
+
+If no database requred Skip `DbModule`, remove `db` from capabilities
+
+This layer implements the domain's repository traits.
+
+1.  **`src/infra/storage/repositories.rs`:**
+    **Rule:** Implement the repository trait using SeaORM. The implementation should be generic over `C: ConnectionTrait` to support both direct connections and transactions.
+
+    ```rust
+    // Example from users_info
+    use sea_orm::{ConnectionTrait, EntityTrait};
+
+    pub struct SeaOrmUsersRepository<C> where C: ConnectionTrait + Send + Sync {
+        conn: C,
+    }
+
+    impl<C> SeaOrmUsersRepository<C> where C: ConnectionTrait + Send + Sync {
+        pub fn new(conn: C) -> Self { Self { conn } }
+    }
+
+    #[async_trait::async_trait]
+    impl<C> crate::domain::repository::UsersRepository for SeaOrmUsersRepository<C>
+    where C: ConnectionTrait + Send + Sync + 'static {
+        async fn find_by_id(&self, id: uuid::Uuid) -> anyhow::Result<Option<crate::contract::model::User>> {
+            let found = super::entity::Entity::find_by_id(id).one(&self.conn).await?;
+            Ok(found.map(Into::into))
+        }
+        // ... other implementations
+    }
+    ```
+
+2.  **`src/infra/storage/migrations/`:**
+    **Rule:** Create a SeaORM migrator. This is mandatory for any module with the `db` capability.
+
+
+### Step 9: SSE Integration (Optional)
 
 If no SSE required: Remove `SseBroadcaster` and event publishing
 
 For real-time event streaming, add Server-Sent Events support.
 
 1.  **`src/api/rest/sse_adapter.rs`:**
-    -   **Rule:** Create an adapter that implements the domain `EventPublisher` port and forwards events to the SSE broadcaster.
+    **Rule:** Create an adapter that implements the domain `EventPublisher` port and forwards events to the SSE broadcaster.
 
     ```rust
     // Example from users_info
@@ -518,7 +830,7 @@ For real-time event streaming, add Server-Sent Events support.
     ```
 
 2.  **Add SSE route registration:**
-    -   **Rule:** Register SSE routes separately from CRUD routes, with proper timeout and Extension layers.
+    **Rule:** Register SSE routes separately from CRUD routes, with proper timeout and Extension layers.
 
     ```rust
     // In api/rest/routes.rs
@@ -540,12 +852,13 @@ For real-time event streaming, add Server-Sent Events support.
     }
     ```
 
-### Step 8: Gateway Implementation
+
+### Step 10: Gateway Implementation (Optional)
 
 Implement the local client that bridges the domain service to the contract API.
 
 1.  **`src/gateways/local.rs`:**
-    -   **Rule:** Create a local implementation of your contract client trait that delegates to the domain service.
+    **Rule:** Create a local implementation of your contract client trait that delegates to the domain service.
 
     ```rust
     // Example from users_info
@@ -573,61 +886,65 @@ Implement the local client that bridges the domain service to the contract API.
     }
     ```
 
-### Step 9: Testing
+
+### Step 11: Testing
 
 -   **Unit Tests:** Place next to the code being tested. Mock repository traits to test domain service logic in isolation.
 -   **Integration/REST Tests:** Place in the `tests/` directory. Use `Router::oneshot` with a stubbed service or a real service connected to a test database to verify handlers, serialization, and error mapping.
--   **Static Verification:** Always run `cargo clippy`, `cargo fmt`, and `cargo audit` before committing.
+
+-  **Integration Test Template** Create `tests/integration_tests.rs` with this boilerplate:
+
+```rust
+use axum::{body::Body, http::{Request, StatusCode}, Router};
+use modkit::api::{OpenApiRegistry, OperationSpec};
+use serde_json::json;
+use std::sync::Arc;
+use tower::ServiceExt;
+use utoipa::openapi::Schema;
+
+// Mock OpenAPI Registry - Required for route registration
+struct MockOpenApiRegistry;
+
+impl OpenApiRegistry for MockOpenApiRegistry {
+    fn register_operation(&self, _spec: &OperationSpec) {}
+
+    fn ensure_schema_raw(&self, name: &str, _properties: Vec<(String, utoipa::openapi::RefOr<Schema>)>) -> String {
+        name.to_string()
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + 'static) {
+        self
+    }
+}
+
+async fn create_test_router() -> Router {
+    let service = create_test_service().await;
+    let router = Router::new();
+    let openapi = MockOpenApiRegistry;
+    your_module::api::rest::routes::register_routes(router, &openapi, service).unwrap()
+}
+
+#[tokio::test]
+async fn test_example_endpoint() {
+    let router = create_test_router().await;
+
+    let request = Request::builder()
+        .uri("/your-endpoint")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+```
 
 ---
 
-## Pitfalls Checklist (must pass)
+## Appendix: Operations & Quality
 
-- capabilities include [db, rest]; module macro includes `deps = ["db"]` and `client = "contract::client::<...>Api"`.
-- do not implement a REST host; `api_ingress` owns the Axum server/OpenAPI.
-- read typed config in `init()` with `#[serde(deny_unknown_fields)]` and provide safe defaults.
-- require DB presence in `init()`; pass the SeaORM connection into repo implementations.
-- build the domain `Service` in `init()` with repository and event publisher dependencies; store it in a thread-safe cell and ensure it's initialized before REST registration.
-- contract models/errors are transport-agnostic (NO serde derives); provide `From` conversions between domain and contract errors.
-- define domain events and ports for clean separation of concerns; use adapters to bridge domain events to transport (SSE).
-- implement local client in `gateways/` that delegates to domain service and implements contract client trait.
-- register ALL endpoints in ONE `register_routes(...)` function using `OperationBuilder` in order: describe → handler → responses → register.
-- after registering routes, attach the service ONCE: `router = router.layer(Extension(service.clone()));`.
-- centralized RFC-9457 mapping to `ProblemResponse`; handler return types follow: GET→`Result<Json<T>, ProblemResponse>`, POST/201→`Result<(StatusCode, Json<T>), ProblemResponse>`, 204→`Result<StatusCode, ProblemResponse>`.
-- implement `DbModule::migrate()` to run the SeaORM migrator.
-- public exports limited to `contract` and the module type; internals marked `#[doc(hidden)]`.
-- include proper `mod.rs` files in all internal module directories for clean re-exports.
-
----
-
-### Edge Cases for LLMs
-- **Complex queries**: Use `impl RangeBounds<T>` in repository traits
-- **File uploads**: Use `impl AsyncRead` in handlers
-
----
-
-### Rust Best Practices
+### A. Rust Best Practices
 
 - **Panic Policy**: Panics mean "stop the program". Use for programming errors only, never for recoverable conditions.
-
-- **Public Types**: All public types MUST implement `Debug`. Types for user display should implement `Display`.
-
-- **API Design**:
-   - Don't expose smart pointers (`Arc<T>`, `Box<T>`) in public APIs
-   - Accept `impl AsRef<str>` instead of `&str` for flexibility
-   - Accept `impl AsRef<Path>` for file paths
-   - Use inherent methods for core functionality, traits for extensions
-   - Accept `impl RangeBounds<T>` for range parameters
-
-- **Error Design**: Use situation-specific error structs with `Backtrace`, not mega-enums. Provide `is_xxx()` helper methods.
-
-- **Static Verification**: Run these tools in CI:
-   - `cargo clippy --all-targets --all-features`
-   - `cargo fmt --check`
-   - `cargo audit` (security vulnerabilities)
-   - `cargo-hack` (feature combinations)
-   - `cargo-udeps` (unused dependencies)
-   - `miri` (unsafe code validation)
 
 - **Type Safety**:
    - All public types must be `Send` (especially futures)
@@ -638,8 +955,45 @@ Implement the local client that bridges the domain service to the contract API.
 
 - **Avoid Statics**: Use dependency injection instead of global statics for correctness.
 
+- **Type Complexity**: Prefer type aliases to simplify nested generic types used widely in a module.
+
+```rust
+// Instead of complex nested types
+type CapabilityStorage = Arc<RwLock<HashMap<SysCapKey, SysCapability>>>;
+type DetectorStorage = Arc<RwLock<HashMap<SysCapKey, CapabilityDetector>>>;
+
+pub struct Repository {
+    capabilities: CapabilityStorage,
+    detectors: DetectorStorage,
+}
+```
+
+### B. Build, Quality, and Hygiene
+
+**Rule:** Run these commands routinely during development and before commit:
+
+```bash
+# Workspace-level build and test
+cargo check --workspace && cargo test --workspace
+
+# Module-specific hygiene (replace 'your-module' with actual name)
+cargo clippy --fix --lib -p your-module --allow-dirty
+cargo fmt --manifest-path modules/your-module/Cargo.toml
+cargo test --manifest-path modules/your-module/Cargo.toml
+```
+
+**Rule:** Clean imports (remove unused `DateTime`, test imports, trait imports).
+
+**Rule:** Fix common issues: missing test imports (`OpenApiRegistry`, `OperationSpec`, `Schema`), type inference errors (add explicit types), missing `chrono::Utc`, handler/service name mismatches.
+
+**Rule:** make and CI should run: `clippy --all-targets --all-features`, `fmt --check`, `audit`, `cargo-hack`, `cargo-udeps`, `miri`.
+
 ---
 
-## References
+## TODO
 
--   `examples/modkit/users_info/` — The canonical reference implementation.
+- passing security context in all methods
+- paging cursor, filtering, sorting
+- events persistency
+- gateways - purpose, rules, implementation
+- careful review, experiment with new modules & finally sing-off
