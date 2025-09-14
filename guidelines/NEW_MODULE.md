@@ -996,4 +996,6 @@ cargo test --manifest-path modules/your-module/Cargo.toml
 - paging cursor, filtering, sorting
 - events persistency
 - gateways - purpose, rules, implementation
+- tracing
+- config
 - careful review, experiment with new modules & finally sing-off
