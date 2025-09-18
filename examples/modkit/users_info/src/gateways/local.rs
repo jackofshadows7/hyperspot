@@ -8,6 +8,7 @@ use crate::contract::{
     model::{NewUser, User, UserPatch},
 };
 use crate::domain::service::Service;
+use modkit::api::odata::ODataQuery;
 
 /// Local implementation of the UsersInfoApi trait that delegates to the domain service
 pub struct UsersInfoLocalClient {
@@ -32,7 +33,7 @@ impl UsersInfoApi for UsersInfoLocalClient {
         offset: Option<u32>,
     ) -> Result<Vec<User>, UsersInfoError> {
         self.service
-            .list_users(limit, offset)
+            .list_users(ODataQuery::none(), limit, offset)
             .await
             .map_err(Into::into)
     }

@@ -1,11 +1,11 @@
+use crate::api::rest::{dto, handlers};
+use crate::domain::service::Service;
 use axum::{Extension, Router};
+use modkit::api::operation_builder::OperationBuilderODataExt;
 use modkit::api::{OpenApiRegistry, OperationBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
-
-use crate::api::rest::{dto, handlers};
-use crate::domain::service::Service;
 
 pub fn register_routes(
     mut router: Router,
@@ -24,6 +24,7 @@ pub fn register_routes(
         .query_param("offset", false, "Number of users to skip")
         .handler(handlers::list_users)
         .json_response_with_schema::<dto::UserListDto>(openapi, 200, "List of users")
+        .with_odata_filter_doc("OData v4 filter. Allowed fields: email, created_at. Examples: `email eq 'test@example.com'`, `contains(email,'@acme.com')`")
         .problem_response(openapi, 400, "Bad Request")
         .problem_response(openapi, 500, "Internal Server Error")
         .register(router, openapi);

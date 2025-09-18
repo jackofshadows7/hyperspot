@@ -8,6 +8,7 @@
         unused_lifetimes
     )
 )]
+
 //! Database abstraction crate providing a database-agnostic `DbHandle`.
 //!
 //! This crate provides a unified interface for working with different databases
@@ -66,6 +67,13 @@
 //!     Ok(())
 //! }
 //! ```
+
+// Re-export key types for public API
+pub use advisory_locks::{DbLockGuard, LockConfig};
+// Advisory locks module
+pub mod advisory_locks;
+pub mod odata;
+
 use std::time::Duration;
 
 #[cfg(feature = "mysql")]
@@ -85,12 +93,6 @@ use sea_orm::SqlxPostgresConnector;
 use sea_orm::SqlxSqliteConnector;
 
 use thiserror::Error;
-
-// Re-export key types for public API
-pub use advisory_locks::{DbLockGuard, LockConfig};
-
-// Advisory locks module
-pub mod advisory_locks;
 
 /// Library-local result type.
 pub type Result<T> = std::result::Result<T, DbError>;

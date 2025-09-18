@@ -20,9 +20,13 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 dirs = "6"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 # optional ORM
-sea-orm = { version = "1", optional = true, default-features = false, features = ["runtime-tokio-rustls"] }
+sea-orm = { version = "1", optional = true, default-features = false, features = ["runtime-tokio-rustls", "with-uuid", "with-chrono", "with-rust_decimal", "macros"] }
 thiserror = "2.0"
 tracing = "0.1"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+odata-core = { path = "../odata-core" }
+bigdecimal = "0.4"
+rust_decimal = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"

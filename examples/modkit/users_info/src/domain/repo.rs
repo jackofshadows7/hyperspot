@@ -1,5 +1,6 @@
 use crate::contract::model::User;
 use async_trait::async_trait;
+use modkit::api::odata::ODataQuery;
 use uuid::Uuid;
 
 /// Port for the domain layer: persistence operations the domain needs.
@@ -19,5 +20,10 @@ pub trait UsersRepository: Send + Sync {
     /// Delete by id. Returns true if a row was deleted.
     async fn delete(&self, id: Uuid) -> anyhow::Result<bool>;
     /// List with simple pagination.
-    async fn list_paginated(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<User>>;
+    async fn list_paginated(
+        &self,
+        od_query: ODataQuery,
+        limit: u64,  // TODO: will be moved to OData filter
+        offset: u64, // TODO: will be moved to OData filter
+    ) -> anyhow::Result<Vec<User>>;
 }

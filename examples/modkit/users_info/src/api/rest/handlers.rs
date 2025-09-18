@@ -11,19 +11,22 @@ use uuid::Uuid;
 use crate::api::rest::dto::{
     CreateUserReq, ListUsersQuery, UpdateUserReq, UserDto, UserEvent, UserListDto,
 };
+
+use modkit::api::odata::OData;
+
 use crate::api::rest::error::map_domain_error;
 use crate::domain::service::Service;
 use modkit::{api::problem::ProblemResponse, SseBroadcaster};
 
-/// List users with optional pagination
 pub async fn list_users(
     Extension(svc): Extension<std::sync::Arc<Service>>,
     Query(query): Query<ListUsersQuery>,
+    OData(filter): OData,
     uri: Uri,
-) -> Result<Json<UserListDto>, ProblemResponse> {
+) -> Result<axum::Json<UserListDto>, ProblemResponse> {
     info!("Listing users with query: {:?}", query);
 
-    match svc.list_users(query.limit, query.offset).await {
+    match svc.list_users(filter, query.limit, query.offset).await {
         Ok(users) => {
             let dto_users: Vec<UserDto> = users.into_iter().map(UserDto::from).collect();
             let response = UserListDto {
@@ -32,7 +35,7 @@ pub async fn list_users(
                 offset: query.offset.unwrap_or(0),
                 users: dto_users,
             };
-            Ok(Json(response))
+            Ok(axum::Json(response))
         }
         Err(e) => {
             error!("Failed to list users: {}", e);

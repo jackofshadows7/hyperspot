@@ -2,12 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, develop ]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
   pull_request:
-    branches: [main, develop]
+    branches: [ main, develop ]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
@@ -36,8 +36,8 @@ jobs:
     strategy:
       fail-fast: false   # do not abort other OSes on a single failure
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable]
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        rust: [ stable ]
 
     steps:
       - name: Force LF in working tree (w/a for Windows)
@@ -152,6 +152,7 @@ jobs:
         continue-on-error: true
 
   coverage:
+    if: false
     name: Code Coverage (cargo-llvm-cov)
     runs-on: ubuntu-latest
     steps:

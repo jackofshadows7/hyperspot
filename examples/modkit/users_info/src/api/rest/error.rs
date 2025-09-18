@@ -64,6 +64,17 @@ pub fn map_domain_error(e: &DomainError, instance: &str) -> ProblemResponse {
             format!("{}", e),
             instance,
         ),
+        DomainError::InvalidFilter { .. } => {
+            // Log the internal error details but don't expose them to the client
+            tracing::error!(error = ?e, "Filter error");
+            from_parts(
+                StatusCode::BAD_REQUEST,
+                "ODATA_FILTER_INVALID",
+                "Filter error",
+                format!("invalid $filter: {e}"),
+                instance,
+            )
+        }
         DomainError::Database { .. } => {
             // Log the internal error details but don't expose them to the client
             tracing::error!(error = ?e, "Database error occurred");
