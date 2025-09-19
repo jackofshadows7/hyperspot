@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use chrono::Utc;
-use tracing::{debug, info, instrument};
-use uuid::Uuid;
-
 use crate::contract::model::{NewUser, User, UserPatch};
 use crate::domain::error::DomainError;
 use crate::domain::events::UserDomainEvent;
 use crate::domain::ports::EventPublisher;
 use crate::domain::repo::UsersRepository;
+use chrono::Utc;
+use modkit::api::odata::ODataQuery;
+use tracing::{debug, info, instrument};
+use uuid::Uuid;
 
 /// Domain service with business rules for user management.
 /// Depends only on the repository port, not on infra types.
@@ -64,23 +64,37 @@ impl Service {
         Ok(user)
     }
 
-    #[instrument(skip(self))]
     pub async fn list_users(
         &self,
+        od_query: ODataQuery,
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> Result<Vec<User>, DomainError> {
+        // Keep your paging policy and clamp
         let limit = limit
             .unwrap_or(self.config.default_page_size)
             .min(self.config.max_page_size);
         let offset = offset.unwrap_or(0);
 
-        debug!("Listing users with limit={limit}, offset={offset}");
+        // Cast once at the seam to the type sea-orm expects
+        let limit64 = limit as u64;
+        let offset64 = offset as u64;
+
+        debug!("Listing users with limit={limit64}, offset={offset64}");
+
         let users = self
             .repo
-            .list_paginated(limit, offset)
+            .list_paginated(od_query, limit64, offset64)
             .await
-            .map_err(|e| DomainError::database(e.to_string()))?;
+            .map_err(|e| {
+                // Check if this is an OData build error and convert appropriately
+                if let Some(odata_err) = e.downcast_ref::<db::odata::ODataBuildError>() {
+                    DomainError::InvalidFilter(odata_err.clone())
+                } else {
+                    DomainError::database(e.to_string())
+                }
+            })?;
+
         debug!("Successfully listed {} users", users.len());
         Ok(users)
     }

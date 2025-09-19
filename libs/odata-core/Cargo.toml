@@ -1,0 +1,13 @@
+[package]
+name = "odata-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+with-odata-params = ["dep:odata-params"]
+
+[dependencies]
+bigdecimal = "0.4"
+uuid = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+odata-params = { version = "0.4", optional = true }

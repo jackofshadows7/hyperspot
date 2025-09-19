@@ -39,7 +39,7 @@ impl Runnable for ExampleServer {
                 _ = interval.tick() => {
                     // Simulate processing a request
                     let count = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 10 == 0 {
+                    if count.is_multiple_of(10) {
                         println!("Processed {} requests", count);
                     }
                 }

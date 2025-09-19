@@ -1,5 +1,6 @@
 ﻿*.rs    text eol=lf
 *.toml  text eol=lf
+*.stderr text eol=lf
 
 # Exceptions
 *.bat text eol=crlf

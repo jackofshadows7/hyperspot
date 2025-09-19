@@ -4,6 +4,7 @@
 //! that API operations cannot be registered unless both a handler and at least one
 //! response are specified.
 
+pub mod odata;
 pub mod operation_builder;
 pub mod problem;
 

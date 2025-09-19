@@ -185,6 +185,9 @@ async fn test_cli_run_command_with_mock_database() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config_path = temp_dir.path().join("test.yaml");
 
+    // Use a random port to avoid conflicts with other tests
+    let test_port = 8900 + (std::process::id() % 100) as u16;
+
     // Write minimal test configuration - the --mock flag will override the database
     let config_content = format!(
         r#"
@@ -202,13 +205,15 @@ logging:
 
 server:
   home_dir: "{}"
+  port: {}
 "#,
         temp_dir
             .path()
             .join("test.log")
             .to_string_lossy()
             .replace('\\', "/"),
-        temp_dir.path().to_string_lossy().replace('\\', "/")
+        temp_dir.path().to_string_lossy().replace('\\', "/"),
+        test_port
     );
 
     std::fs::write(&config_path, config_content).expect("Failed to write config file");

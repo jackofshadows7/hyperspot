@@ -18,19 +18,3 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
-
-/// Data for creating a new user entity
-pub struct NewUserEntity {
-    pub id: Uuid,
-    pub email: String,
-    pub display_name: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Data for updating an existing user entity
-pub struct UpdateUserEntity {
-    pub email: Option<String>,
-    pub display_name: Option<String>,
-    pub updated_at: Option<DateTime<Utc>>,
-}

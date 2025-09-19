@@ -6,6 +6,7 @@
 //! and pass it down to a short-lived service (or expose lower-level APIs).
 
 use anyhow::Context;
+use once_cell::sync::Lazy;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set,
@@ -15,6 +16,10 @@ use uuid::Uuid;
 use crate::contract::User;
 use crate::domain::repo::UsersRepository;
 use crate::infra::storage::entity::{ActiveModel as UserAM, Column, Entity as UserEntity};
+use db::odata;
+use modkit::api::odata::ODataQuery;
+
+use db::odata::ODataExt;
 
 /// SeaORM repository impl.
 /// Holds a connection object; its lifetime/ownership is up to the caller.
@@ -33,6 +38,18 @@ where
         Self { conn }
     }
 }
+
+// Whitelist of fields available in $filter (API name -> DB column)
+static USER_FMAP: Lazy<odata::FieldMap<UserEntity>> = Lazy::new(|| {
+    odata::FieldMap::<UserEntity>::new()
+        .insert("id", Column::Id, odata::FieldKind::Uuid)
+        .insert("email", Column::Email, odata::FieldKind::String)
+        .insert(
+            "created_at",
+            Column::CreatedAt,
+            odata::FieldKind::DateTimeUtc,
+        )
+});
 
 #[async_trait::async_trait]
 impl<C> UsersRepository for SeaOrmUsersRepository<C>
@@ -89,14 +106,21 @@ where
         Ok(res.rows_affected > 0)
     }
 
-    async fn list_paginated(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<User>> {
-        let rows = UserEntity::find()
+    /// list + optional OData $filter (AST), with type-safe scope
+    async fn list_paginated(
+        &self,
+        od_query: ODataQuery,
+        limit: u64,
+        offset: u64,
+    ) -> anyhow::Result<Vec<User>> {
+        let q = UserEntity::find()
             .order_by_asc(Column::CreatedAt)
-            .limit(limit as u64)
-            .offset(offset as u64)
-            .all(&self.conn)
-            .await
-            .context("list_paginated failed")?;
+            .apply_odata_filter(od_query, &*USER_FMAP)?
+            .limit(limit)
+            .offset(offset);
+
+        let rows = q.all(&self.conn).await.context("list_paginated failed")?;
+
         Ok(rows.into_iter().map(Into::into).collect())
     }
 }

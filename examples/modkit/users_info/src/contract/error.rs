@@ -50,6 +50,7 @@ impl From<crate::domain::error::DomainError> for UsersInfoError {
                 len, max
             )),
             Validation { field, message } => Self::validation(format!("{}: {}", field, message)),
+            InvalidFilter { .. } => Self::validation("Invalid filter".to_string()),
             Database { .. } => Self::internal(),
         }
     }

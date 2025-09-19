@@ -127,7 +127,9 @@ async fn test_domain_service_crud() -> Result<()> {
     assert_eq!(retrieved_user.email, created_user.email);
 
     // list
-    let users = service.list_users(None, None).await?;
+    let users = service
+        .list_users(modkit::api::odata::ODataQuery::none(), None, None)
+        .await?;
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].id, created_user.id);
 
@@ -296,6 +298,73 @@ async fn test_rest_api_validation_errors() -> Result<()> {
 
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rest_api_invalid_odata_filter() -> Result<()> {
+    let router = create_test_router().await;
+
+    // Create a user first to have some data
+    let create_request = CreateUserReq {
+        email: "test@example.com".to_string(),
+        display_name: "Test User".to_string(),
+    };
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/users")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&create_request)?))
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Now test with invalid OData filter - unknown field
+    let request = Request::builder()
+        .method("GET")
+        .uri("/users?%24filter=unknown_field%20eq%20%27test%27")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let problem: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify it's the correct error type for invalid filter
+    assert_eq!(
+        problem["type"],
+        "https://errors.example.com/ODATA_FILTER_INVALID"
+    );
+    assert_eq!(problem["title"], "Filter error");
+    assert!(problem["detail"]
+        .as_str()
+        .unwrap()
+        .contains("unknown field"));
+
+    // Test with another type of invalid filter - type mismatch
+    let request = Request::builder()
+        .method("GET")
+        .uri("/users?%24filter=id%20eq%20%27not-a-uuid%27")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let problem: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Should still be the same error type
+    assert_eq!(
+        problem["type"],
+        "https://errors.example.com/ODATA_FILTER_INVALID"
+    );
+    assert_eq!(problem["title"], "Filter error");
 
     Ok(())
 }

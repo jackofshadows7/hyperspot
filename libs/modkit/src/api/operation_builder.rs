@@ -113,6 +113,42 @@ pub struct OperationSpec {
     pub handler_id: String,
 }
 
+//
+pub trait OperationBuilderODataExt<S, H, R> {
+    /// Adds optional `$filter` query parameter to OpenAPI.
+    fn with_odata_filter(self) -> Self;
+
+    /// Same as above but with explicit description (e.g., allowed fields).
+    fn with_odata_filter_doc(self, description: impl Into<String>) -> Self;
+}
+
+impl<S, H, R> OperationBuilderODataExt<S, H, R> for OperationBuilder<H, R, S>
+where
+    H: HandlerSlot<S>,
+{
+    fn with_odata_filter(mut self) -> Self {
+        self.spec.params.push(ParamSpec {
+            name: "$filter".to_string(),
+            location: ParamLocation::Query,
+            required: false,
+            description: Some("OData v4 filter expression".to_string()),
+            param_type: "string".to_string(),
+        });
+        self
+    }
+
+    fn with_odata_filter_doc(mut self, description: impl Into<String>) -> Self {
+        self.spec.params.push(ParamSpec {
+            name: "$filter".to_string(),
+            location: ParamLocation::Query,
+            required: false,
+            description: Some(description.into()),
+            param_type: "string".to_string(),
+        });
+        self
+    }
+}
+
 /// Registry trait for OpenAPI operations and schemas
 pub trait OpenApiRegistry {
     /// Register an API operation specification
