@@ -48,6 +48,7 @@ pub mod contracts;
 // Type-safe API operation builder
 pub mod api;
 pub use api::{OpenApiRegistry, OperationBuilder};
+pub use odata_core::{Page, PageInfo};
 
 // HTTP utilities
 pub mod http;

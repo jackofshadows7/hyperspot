@@ -1,4 +1,3 @@
-use db::odata;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -19,10 +18,6 @@ pub enum DomainError {
 
     #[error("Display name too long: {len} characters (max: {max})")]
     DisplayNameTooLong { len: usize, max: usize },
-
-    /// Semantic error in $filter (unknown field, wrong type, unsupported fn, etc.)
-    #[error("invalid $filter: {0}")]
-    InvalidFilter(#[from] odata::ODataBuildError),
 
     #[error("Database error: {message}")]
     Database { message: String },

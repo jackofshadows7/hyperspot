@@ -333,6 +333,26 @@ OperationBuilder::post("/users")
 
 ---
 
+# Modkit Unified Pagination/OData System
+
+## Layers
+- `odata-core`: AST, ODataQuery, CursorV1, ODataOrderBy, SortDir, ODataPageError, **Page<T>/PageInfo**.
+- `modkit`: HTTP extractor for OData (`$filter`, `$orderby`, `limit`, `cursor`) with budgets + Problem mapper.
+- `db`: OData AST → SeaORM Condition; order, cursor predicate, paginator `paginate_with_odata`.
+
+## Usage (3 steps)
+1. In the handler: `OData(q)` extractor (Axum) → pass `q` down to service.
+2. In repo/service: call `paginate_with_odata(...)` and return `Page<T>`.
+3. In REST: map `ODataPageError` to Problem once via `odata_page_error_to_problem`.
+
+### Notes
+- If `cursor` present, `$orderby` must be omitted (400 ORDER_WITH_CURSOR).
+- Cursors are opaque, Base64URL v1; include signed order `s` and filter hash `f`.
+- Order must include a unique tiebreaker (e.g., `id`), enforced via helper.
+
+
+---
+
 ## Server-Sent Events (SSE)
 
 ModKit provides built-in support for Server-Sent Events through the `SseBroadcaster<T>` type and `OperationBuilder` integration. This enables real-time streaming of typed events to web clients with proper OpenAPI documentation.

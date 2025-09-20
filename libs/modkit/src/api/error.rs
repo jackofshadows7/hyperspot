@@ -1,0 +1,59 @@
+use crate::api::problem::ProblemResponse;
+use axum::response::IntoResponse;
+use odata_core::ODataPageError;
+
+/// Unified API error type that handles all errors at the API boundary
+///
+/// This centralizes error handling so that handlers can use `?` operator
+/// and automatically get proper RFC 9457 Problem+json responses.
+///
+/// The `D` type parameter allows different modules to use their own domain error types
+/// while still getting unified error handling at the API boundary.
+#[derive(thiserror::Error, Debug)]
+pub enum ApiError<D> {
+    /// OData pagination errors (filter, orderby, cursor issues)
+    #[error(transparent)]
+    OData(ODataPageError),
+
+    /// Domain business logic errors
+    #[error(transparent)]
+    Domain(D),
+}
+
+// Manual implementations to avoid conflicts with generic From trait
+impl<D> ApiError<D> {
+    /// Create an ApiError from an ODataPageError
+    pub fn from_odata(e: ODataPageError) -> Self {
+        ApiError::OData(e)
+    }
+
+    /// Create an ApiError from a domain error
+    pub fn from_domain(e: D) -> Self {
+        ApiError::Domain(e)
+    }
+}
+
+impl<D> From<ODataPageError> for ApiError<D> {
+    fn from(e: ODataPageError) -> Self {
+        ApiError::OData(e)
+    }
+}
+
+impl<D> IntoResponse for ApiError<D>
+where
+    D: Into<ProblemResponse>,
+{
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            ApiError::OData(e) => {
+                // Use fallback instance "/" if no request context available
+                // In real apps, this could be improved to get actual request path
+                crate::api::odata::odata_page_error_to_problem(&e, "/").into_response()
+            }
+            ApiError::Domain(e) => {
+                // Convert the domain error to a ProblemResponse
+                e.into().into_response()
+            }
+        }
+    }
+}
