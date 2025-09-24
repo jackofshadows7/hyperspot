@@ -8,8 +8,7 @@
 use anyhow::Context;
 use once_cell::sync::Lazy;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
 };
 use uuid::Uuid;
 
@@ -17,9 +16,10 @@ use crate::contract::User;
 use crate::domain::repo::UsersRepository;
 use crate::infra::storage::entity::{ActiveModel as UserAM, Column, Entity as UserEntity};
 use db::odata;
-use modkit::api::odata::ODataQuery;
+use odata_core::ODataQuery;
+use odata_core::Page;
 
-use db::odata::ODataExt;
+use odata_core::SortDir;
 
 /// SeaORM repository impl.
 /// Holds a connection object; its lifetime/ownership is up to the caller.
@@ -39,15 +39,20 @@ where
     }
 }
 
-// Whitelist of fields available in $filter (API name -> DB column)
+// Whitelist of fields available in $filter (API name -> DB column) with extractors
 static USER_FMAP: Lazy<odata::FieldMap<UserEntity>> = Lazy::new(|| {
     odata::FieldMap::<UserEntity>::new()
-        .insert("id", Column::Id, odata::FieldKind::Uuid)
-        .insert("email", Column::Email, odata::FieldKind::String)
-        .insert(
+        .insert_with_extractor("id", Column::Id, odata::FieldKind::Uuid, |m| {
+            m.id.to_string()
+        })
+        .insert_with_extractor("email", Column::Email, odata::FieldKind::String, |m| {
+            m.email.clone()
+        })
+        .insert_with_extractor(
             "created_at",
             Column::CreatedAt,
             odata::FieldKind::DateTimeUtc,
+            |m| m.created_at.to_rfc3339(),
         )
 });
 
@@ -106,21 +111,22 @@ where
         Ok(res.rows_affected > 0)
     }
 
-    /// list + optional OData $filter (AST), with type-safe scope
-    async fn list_paginated(
+    async fn list_users_page(
         &self,
-        od_query: ODataQuery,
-        limit: u64,
-        offset: u64,
-    ) -> anyhow::Result<Vec<User>> {
-        let q = UserEntity::find()
-            .order_by_asc(Column::CreatedAt)
-            .apply_odata_filter(od_query, &*USER_FMAP)?
-            .limit(limit)
-            .offset(offset);
-
-        let rows = q.all(&self.conn).await.context("list_paginated failed")?;
-
-        Ok(rows.into_iter().map(Into::into).collect())
+        query: &ODataQuery,
+    ) -> Result<Page<User>, odata_core::ODataPageError> {
+        db::odata::paginate_with_odata::<UserEntity, User, _, _>(
+            UserEntity::find(),
+            &self.conn,
+            query,
+            &USER_FMAP,
+            ("id", SortDir::Desc),
+            db::odata::LimitCfg {
+                default: 25,
+                max: 1000,
+            },
+            |model| model.into(),
+        )
+        .await
     }
 }

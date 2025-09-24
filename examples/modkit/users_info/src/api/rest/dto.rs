@@ -29,24 +29,7 @@ pub struct UpdateUserReq {
     pub display_name: Option<String>,
 }
 
-/// REST DTO for user list response
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct UserListDto {
-    pub users: Vec<UserDto>,
-    pub total: usize,
-    pub limit: u32,
-    pub offset: u32,
-}
-
-/// REST DTO for query parameters
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-pub struct ListUsersQuery {
-    pub limit: Option<u32>,
-    pub offset: Option<u32>,
-}
-
 // Conversion implementations between REST DTOs and contract models
-
 impl From<User> for UserDto {
     fn from(user: User) -> Self {
         Self {

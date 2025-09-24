@@ -1,120 +1,83 @@
-use axum::{
-    extract::{Path, Query},
-    http::{StatusCode, Uri},
-    response::IntoResponse,
-    response::Json,
-    Extension,
-};
-use tracing::{error, info};
+use axum::{extract::Path, http::StatusCode, response::IntoResponse, response::Json, Extension};
+use tracing::info;
 use uuid::Uuid;
 
-use crate::api::rest::dto::{
-    CreateUserReq, ListUsersQuery, UpdateUserReq, UserDto, UserEvent, UserListDto,
-};
+use crate::api::rest::dto::{CreateUserReq, UpdateUserReq, UserDto, UserEvent};
 
 use modkit::api::odata::OData;
+use modkit::api::ApiError;
+use odata_core::Page;
 
-use crate::api::rest::error::map_domain_error;
 use crate::domain::service::Service;
-use modkit::{api::problem::ProblemResponse, SseBroadcaster};
+use modkit::SseBroadcaster;
 
+// Type alias for our specific ApiError with DomainError
+type UsersApiError = ApiError<crate::domain::error::DomainError>;
+
+/// List users with cursor-based pagination
 pub async fn list_users(
     Extension(svc): Extension<std::sync::Arc<Service>>,
-    Query(query): Query<ListUsersQuery>,
-    OData(filter): OData,
-    uri: Uri,
-) -> Result<axum::Json<UserListDto>, ProblemResponse> {
-    info!("Listing users with query: {:?}", query);
+    OData(query): OData,
+) -> Result<Json<Page<UserDto>>, UsersApiError> {
+    info!("Listing users with cursor pagination");
 
-    match svc.list_users(filter, query.limit, query.offset).await {
-        Ok(users) => {
-            let dto_users: Vec<UserDto> = users.into_iter().map(UserDto::from).collect();
-            let response = UserListDto {
-                total: dto_users.len(),
-                limit: query.limit.unwrap_or(50),
-                offset: query.offset.unwrap_or(0),
-                users: dto_users,
-            };
-            Ok(axum::Json(response))
-        }
-        Err(e) => {
-            error!("Failed to list users: {}", e);
-            Err(map_domain_error(&e, uri.path()))
-        }
-    }
+    let page = svc.list_users_page(query).await?.map_items(UserDto::from);
+    Ok(Json(page))
 }
 
 /// Get a specific user by ID
 pub async fn get_user(
     Extension(svc): Extension<std::sync::Arc<Service>>,
     Path(id): Path<Uuid>,
-    uri: Uri,
-) -> Result<Json<UserDto>, ProblemResponse> {
+) -> Result<Json<UserDto>, UsersApiError> {
     info!("Getting user with id: {}", id);
 
-    match svc.get_user(id).await {
-        Ok(user) => Ok(Json(UserDto::from(user))),
-        Err(e) => {
-            error!("Failed to get user {}: {}", id, e);
-            Err(map_domain_error(&e, uri.path()))
-        }
-    }
+    let user = svc.get_user(id).await.map_err(UsersApiError::from_domain)?;
+    Ok(Json(UserDto::from(user)))
 }
 
 /// Create a new user
 pub async fn create_user(
-    uri: Uri,
     Extension(svc): Extension<std::sync::Arc<Service>>,
     Json(req_body): Json<CreateUserReq>,
-) -> Result<(StatusCode, Json<UserDto>), ProblemResponse> {
+) -> Result<(StatusCode, Json<UserDto>), UsersApiError> {
     info!("Creating user: {:?}", req_body);
 
     let new_user = req_body.into();
-
-    match svc.create_user(new_user).await {
-        Ok(user) => Ok((StatusCode::CREATED, Json(UserDto::from(user)))),
-        Err(e) => {
-            error!("Failed to create user: {}", e);
-            Err(map_domain_error(&e, uri.path()))
-        }
-    }
+    let user = svc
+        .create_user(new_user)
+        .await
+        .map_err(UsersApiError::from_domain)?;
+    Ok((StatusCode::CREATED, Json(UserDto::from(user))))
 }
 
 /// Update an existing user
 pub async fn update_user(
-    uri: Uri,
     Extension(svc): Extension<std::sync::Arc<Service>>,
     Path(id): Path<Uuid>,
     Json(req_body): Json<UpdateUserReq>,
-) -> Result<Json<UserDto>, ProblemResponse> {
+) -> Result<Json<UserDto>, UsersApiError> {
     info!("Updating user {} with: {:?}", id, req_body);
 
     let patch = req_body.into();
-
-    match svc.update_user(id, patch).await {
-        Ok(user) => Ok(Json(UserDto::from(user))),
-        Err(e) => {
-            error!("Failed to update user {}: {}", id, e);
-            Err(map_domain_error(&e, uri.path()))
-        }
-    }
+    let user = svc
+        .update_user(id, patch)
+        .await
+        .map_err(UsersApiError::from_domain)?;
+    Ok(Json(UserDto::from(user)))
 }
 
 /// Delete a user by ID
 pub async fn delete_user(
     Extension(svc): Extension<std::sync::Arc<Service>>,
     Path(id): Path<Uuid>,
-    uri: Uri,
-) -> Result<StatusCode, ProblemResponse> {
+) -> Result<StatusCode, UsersApiError> {
     info!("Deleting user: {}", id);
 
-    match svc.delete_user(id).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => {
-            error!("Failed to delete user {}: {}", id, e);
-            Err(map_domain_error(&e, uri.path()))
-        }
-    }
+    svc.delete_user(id)
+        .await
+        .map_err(UsersApiError::from_domain)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// SSE endpoint returning a live stream of `UserEvent`.

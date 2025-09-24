@@ -27,8 +27,10 @@ pub fn from_parts(
 use crate::domain::error::DomainError;
 
 /// Map domain error to RFC9457 ProblemResponse
-pub fn map_domain_error(e: &DomainError, instance: &str) -> ProblemResponse {
-    match e {
+/// This is now only used for domain-specific business logic errors.
+/// Pagination errors are handled directly by the unified ApiError system.
+pub fn domain_error_to_problem(e: DomainError, instance: &str) -> ProblemResponse {
+    match &e {
         DomainError::UserNotFound { id } => from_parts(
             StatusCode::NOT_FOUND,
             "USERS_NOT_FOUND",
@@ -64,17 +66,6 @@ pub fn map_domain_error(e: &DomainError, instance: &str) -> ProblemResponse {
             format!("{}", e),
             instance,
         ),
-        DomainError::InvalidFilter { .. } => {
-            // Log the internal error details but don't expose them to the client
-            tracing::error!(error = ?e, "Filter error");
-            from_parts(
-                StatusCode::BAD_REQUEST,
-                "ODATA_FILTER_INVALID",
-                "Filter error",
-                format!("invalid $filter: {e}"),
-                instance,
-            )
-        }
         DomainError::Database { .. } => {
             // Log the internal error details but don't expose them to the client
             tracing::error!(error = ?e, "Database error occurred");
@@ -86,5 +77,12 @@ pub fn map_domain_error(e: &DomainError, instance: &str) -> ProblemResponse {
                 instance,
             )
         }
+    }
+}
+
+/// Implement Into<ProblemResponse> for DomainError so it works with ApiError
+impl From<DomainError> for modkit::api::problem::ProblemResponse {
+    fn from(e: DomainError) -> Self {
+        domain_error_to_problem(e, "/")
     }
 }
