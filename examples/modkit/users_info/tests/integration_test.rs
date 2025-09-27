@@ -128,7 +128,7 @@ async fn test_domain_service_crud() -> Result<()> {
 
     // list
     let page = service
-        .list_users_page(modkit::api::odata::ODataQuery::none())
+        .list_users_page(modkit::api::odata::ODataQuery::default())
         .await?;
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, created_user.id);
@@ -213,7 +213,7 @@ async fn test_local_client() -> Result<()> {
 
     // list
     let page = client
-        .list_users(modkit::api::odata::ODataQuery::none())
+        .list_users(modkit::api::odata::ODataQuery::default())
         .await?;
     assert!(!page.items.is_empty());
 

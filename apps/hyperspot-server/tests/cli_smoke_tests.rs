@@ -142,7 +142,9 @@ fn test_cli_config_validation_valid_config() {
     // Write valid configuration
     let config_content = r#"
 database:
-  url: "sqlite:///tmp/test.db"
+  servers:
+    test_sqlite:
+      dsn: "sqlite:///tmp/test.db"
 
 logging:
   # global section
@@ -192,7 +194,9 @@ async fn test_cli_run_command_with_mock_database() {
     let config_content = format!(
         r#"
 database:
-  url: "postgresql://localhost/nonexistent"
+  servers:
+    test_postgres:
+      dsn: "postgresql://localhost/nonexistent"
 
 logging:
   default:
@@ -206,6 +210,13 @@ logging:
 server:
   home_dir: "{}"
   port: {}
+
+modules:
+  api_ingress:
+    config:
+      bind_addr: "127.0.0.1:8087"
+      enable_docs: false
+      cors_enabled: false
 "#,
         temp_dir
             .path()
@@ -263,7 +274,9 @@ fn test_cli_run_command_config_validation() {
     // Write configuration with invalid bind address
     let config_content = r#"
 database:
-  url: "sqlite:///tmp/test.db"
+  servers:
+    test_sqlite:
+      dsn: "sqlite:///tmp/test.db"
 
 logging:
   level: "info"
@@ -294,7 +307,9 @@ fn test_cli_mock_flag() {
     // Write configuration with PostgreSQL (which should be overridden by --mock)
     let config_content = r#"
 database:
-  url: "postgresql://localhost/nonexistent"
+  servers:
+    test_postgres:
+      dsn: "postgresql://localhost/nonexistent"
 
 logging:
   default:
@@ -394,7 +409,9 @@ fn test_cli_config_precedence() {
     // Write minimal valid configuration
     let config_content = r#"
 database:
-  url: "sqlite:///tmp/test.db"
+  servers:
+    test_sqlite:
+      dsn: "sqlite:///tmp/test.db"
 
 logging:
   default:

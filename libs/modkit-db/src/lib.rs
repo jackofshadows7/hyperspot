@@ -9,72 +9,91 @@
     )
 )]
 
-//! Database abstraction crate providing a database-agnostic `DbHandle`.
+//! ModKit Database abstraction crate.
 //!
 //! This crate provides a unified interface for working with different databases
 //! (SQLite, PostgreSQL, MySQL) through SQLx, with optional SeaORM integration.
+//! It emphasizes typed connection options over DSN string manipulation and
+//! implements strict security controls (e.g., SQLite PRAGMA whitelist).
 //!
 //! # Features
 //! - `pg`, `mysql`, `sqlite`: enable SQLx backends
 //! - `sea-orm`: add SeaORM integration for type-safe operations
 //!
-//! # Example
+//! # New Architecture
+//! The crate now supports:
+//! - Typed `DbConnectOptions` using sqlx ConnectOptions (no DSN string building)
+//! - Per-module database factories with configuration merging
+//! - SQLite PRAGMA whitelist for security
+//! - Environment variable expansion in passwords and DSNs
+//!
+//! # Example (DbManager API)
 //! ```rust,no_run
-//! #[tokio::main]
-//! async fn main() -> db::Result<()> {
-//!     use db::{DbHandle, ConnectOpts};
+//! use modkit_db::{DbManager, GlobalDatabaseConfig, DbConnConfig};
+//! use figment::{Figment, providers::Serialized};
+//! use std::path::PathBuf;
+//! use std::sync::Arc;
 //!
-//!     let db = DbHandle::connect("postgres://user:pass@localhost/app", ConnectOpts::default()).await?;
+//! // Create configuration using Figment
+//! let figment = Figment::new()
+//!     .merge(Serialized::defaults(serde_json::json!({
+//!         "db": {
+//!             "servers": {
+//!                 "main": {
+//!                     "host": "localhost",
+//!                     "port": 5432,
+//!                     "user": "app",
+//!                     "password": "${DB_PASSWORD}",
+//!                     "dbname": "app_db"
+//!                 }
+//!             }
+//!         },
+//!         "test_module": {
+//!             "database": {
+//!                 "server": "main",
+//!                 "dbname": "module_db"
+//!             }
+//!         }
+//!     })));
 //!
-//!     // sqlx
-//!     #[cfg(feature="pg")]
-//!     {
-//!         let pool = db.sqlx_postgres().unwrap();
-//!         // Help type inference for doctests: specify database type explicitly
-//!         sqlx::query::<sqlx::Postgres>("select 1").execute(pool).await?;
+//! // Create DbManager
+//! let home_dir = PathBuf::from("/app/data");
+//! let db_manager = Arc::new(DbManager::from_figment(figment, home_dir).unwrap());
 //!
-//!         // Execute within a dedicated connection (doctest-friendly)
-//!         let mut conn = pool.acquire().await?;
-//!         sqlx::query::<sqlx::Postgres>("select 2").execute(&mut *conn).await?;
-//!     }
-//!
-//!     #[cfg(feature="mysql")]
-//!     {
-//!         let pool = db.sqlx_mysql().unwrap();
-//!         sqlx::query::<sqlx::MySql>("select 1").execute(pool).await?;
-//!
-//!         let mut conn = pool.acquire().await?;
-//!         sqlx::query::<sqlx::MySql>("select 2").execute(&mut *conn).await?;
-//!     }
-//!
-//!     #[cfg(feature="sqlite")]
-//!     {
-//!         let pool = db.sqlx_sqlite().unwrap();
-//!         sqlx::query::<sqlx::Sqlite>("select 1").execute(pool).await?;
-//!
-//!         let mut conn = pool.acquire().await?;
-//!         sqlx::query::<sqlx::Sqlite>("select 2").execute(&mut *conn).await?;
-//!     }
-//!
-//!     // sea-orm (if enabled)
-//!     #[cfg(feature="sea-orm")]
-//!     {
-//!         use sea_orm::{ConnectionTrait, Statement, DatabaseBackend};
-//!         db.sea().execute(Statement::from_string(DatabaseBackend::Postgres, "SELECT 3")).await?;
-//!     }
-//!
-//!     db.close().await;
-//!     Ok(())
-//! }
+//! // Use in runtime with DbOptions::Manager(db_manager)
+//! // Modules can then use: ctx.db_required_async().await?
 //! ```
 
 // Re-export key types for public API
 pub use advisory_locks::{DbLockGuard, LockConfig};
-// Advisory locks module
+
+// Core modules
 pub mod advisory_locks;
+pub mod config;
+pub mod manager;
 pub mod odata;
+pub mod options;
+
+// Internal modules
+mod pool_opts;
+#[cfg(feature = "sqlite")]
+mod sqlite;
+
+// Re-export important types from new modules
+pub use config::{DbConnConfig, GlobalDatabaseConfig, PoolCfg};
+pub use manager::DbManager;
+pub use options::{
+    build_db_handle, redact_credentials_in_dsn, ConnectionOptionsError, DbConnectOptions,
+};
 
 use std::time::Duration;
+
+// Internal imports
+use pool_opts::ApplyPoolOpts;
+#[cfg(feature = "sqlite")]
+use sqlite::{extract_sqlite_pragmas, is_memory_dsn, prepare_sqlite_path, Pragmas};
+
+// Used for parsing SQLite DSN query parameters
 
 #[cfg(feature = "mysql")]
 use sqlx::{mysql::MySqlPoolOptions, MySql, MySqlPool};
@@ -106,6 +125,30 @@ pub enum DbError {
     #[error("Feature not enabled: {0}")]
     FeatureDisabled(&'static str),
 
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+
+    #[error("Configuration conflict: {0}")]
+    ConfigConflict(String),
+
+    #[error("Invalid SQLite PRAGMA parameter '{key}': {message}")]
+    InvalidSqlitePragma { key: String, message: String },
+
+    #[error("Unknown SQLite PRAGMA parameter: {0}")]
+    UnknownSqlitePragma(String),
+
+    #[error("Invalid connection parameter: {0}")]
+    InvalidParameter(String),
+
+    #[error("SQLite pragma error: {0}")]
+    SqlitePragma(String),
+
+    #[error("Environment variable error: {0}")]
+    EnvVar(#[from] std::env::VarError),
+
+    #[error("URL parsing error: {0}")]
+    UrlParse(#[from] url::ParseError),
+
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 
@@ -116,12 +159,16 @@ pub enum DbError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error("SQLite pragma error: {0}")]
-    SqlitePragma(String),
-
     // make advisory_locks errors flow into DbError via `?`
     #[error(transparent)]
     Lock(#[from] advisory_locks::DbLockError),
+
+    // Convert from the old ConnectionOptionsError
+    #[error(transparent)]
+    ConnectionOptions(#[from] ConnectionOptionsError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
 
 /// Supported engines.
@@ -148,9 +195,6 @@ pub struct ConnectOpts {
     pub max_lifetime: Option<Duration>,
     /// Test connection health before acquire.
     pub test_before_acquire: bool,
-
-    /// SQLite-specific: busy timeout used via PRAGMA busy_timeout.
-    pub sqlite_busy_timeout: Option<Duration>,
     /// For SQLite file DSNs, create parent directories if missing.
     pub create_sqlite_dirs: bool,
 }
@@ -164,14 +208,13 @@ impl Default for ConnectOpts {
             max_lifetime: None,
             test_before_acquire: false,
 
-            sqlite_busy_timeout: Some(Duration::from_millis(5_000)),
             create_sqlite_dirs: true,
         }
     }
 }
 
 /// One concrete sqlx pool.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum DbPool {
     #[cfg(feature = "pg")]
     Postgres(PgPool),
@@ -226,6 +269,7 @@ impl<'a> DbTransaction<'a> {
 }
 
 /// Main handle.
+#[derive(Debug)]
 pub struct DbHandle {
     engine: DbEngine,
     pool: DbPool,
@@ -233,6 +277,8 @@ pub struct DbHandle {
     #[cfg(feature = "sea-orm")]
     sea: DatabaseConnection,
 }
+
+const DEFAULT_SQLITE_BUSY_TIMEOUT: i32 = 5000;
 
 impl DbHandle {
     /// Detect engine by DSN.
@@ -261,25 +307,7 @@ impl DbHandle {
         match engine {
             #[cfg(feature = "pg")]
             DbEngine::Postgres => {
-                let mut o = PgPoolOptions::new();
-                if let Some(n) = opts.max_conns {
-                    o = o.max_connections(n);
-                }
-                if let Some(n) = opts.min_conns {
-                    o = o.min_connections(n);
-                }
-                if let Some(t) = opts.acquire_timeout {
-                    o = o.acquire_timeout(t);
-                }
-                if let Some(t) = opts.idle_timeout {
-                    o = o.idle_timeout(t);
-                }
-                if let Some(t) = opts.max_lifetime {
-                    o = o.max_lifetime(t);
-                }
-                if opts.test_before_acquire {
-                    o = o.test_before_acquire(true);
-                }
+                let o = PgPoolOptions::new().apply(&opts);
                 let pool = o.connect(dsn).await?;
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxPostgresConnector::from_sqlx_postgres_pool(pool.clone());
@@ -293,25 +321,7 @@ impl DbHandle {
             }
             #[cfg(feature = "mysql")]
             DbEngine::MySql => {
-                let mut o = MySqlPoolOptions::new();
-                if let Some(n) = opts.max_conns {
-                    o = o.max_connections(n);
-                }
-                if let Some(n) = opts.min_conns {
-                    o = o.min_connections(n);
-                }
-                if let Some(t) = opts.acquire_timeout {
-                    o = o.acquire_timeout(t);
-                }
-                if let Some(t) = opts.idle_timeout {
-                    o = o.idle_timeout(t);
-                }
-                if let Some(t) = opts.max_lifetime {
-                    o = o.max_lifetime(t);
-                }
-                if opts.test_before_acquire {
-                    o = o.test_before_acquire(true);
-                }
+                let o = MySqlPoolOptions::new().apply(&opts);
                 let pool = o.connect(dsn).await?;
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxMySqlConnector::from_sqlx_mysql_pool(pool.clone());
@@ -326,62 +336,72 @@ impl DbHandle {
             #[cfg(feature = "sqlite")]
             DbEngine::Sqlite => {
                 let dsn = prepare_sqlite_path(dsn, opts.create_sqlite_dirs)?;
-                let mut o = SqlitePoolOptions::new();
 
-                if let Some(n) = opts.max_conns {
-                    o = o.max_connections(n);
-                }
-                if let Some(n) = opts.min_conns {
-                    o = o.min_connections(n);
-                }
-                if let Some(t) = opts.acquire_timeout {
-                    o = o.acquire_timeout(t);
-                }
-                if let Some(t) = opts.idle_timeout {
-                    o = o.idle_timeout(t);
-                }
-                if let Some(t) = opts.max_lifetime {
-                    o = o.max_lifetime(t);
-                }
-                if opts.test_before_acquire {
-                    o = o.test_before_acquire(true);
-                }
+                // Extract SQLite PRAGMA parameters from DSN
+                let (clean_dsn, pairs) = extract_sqlite_pragmas(&dsn);
+                let pragmas = Pragmas::from_pairs(&pairs);
 
-                // Copy busy timeout into the closure (per-connection PRAGMAs)
-                let busy = opts.sqlite_busy_timeout;
+                // Build pool options with shared trait
+                let mut o = SqlitePoolOptions::new().apply(&opts);
+
+                // Apply SQLite pragmas with special handling for in-memory databases
+                let is_memory = is_memory_dsn(&clean_dsn);
                 o = o.after_connect(move |conn, _meta| {
-                    let busy = busy;
+                    let pragmas = pragmas.clone();
                     Box::pin(async move {
-                        // Each call borrows `conn` mutably for the duration of the await,
-                        // without moving the &mut SqliteConnection itself.
-                        sqlx::query("PRAGMA journal_mode = WAL")
-                            .execute(&mut *conn)
-                            .await?;
+                        // Apply journal_mode
+                        let journal_mode = if let Some(mode) = &pragmas.journal_mode {
+                            mode.as_sql()
+                        } else if let Some(wal_toggle) = pragmas.wal_toggle {
+                            if wal_toggle {
+                                "WAL"
+                            } else {
+                                "DELETE"
+                            }
+                        } else {
+                            // Default: DELETE for memory, WAL for file
+                            if is_memory {
+                                "DELETE"
+                            } else {
+                                "WAL"
+                            }
+                        };
 
-                        sqlx::query("PRAGMA synchronous = NORMAL")
-                            .execute(&mut *conn)
-                            .await?;
+                        let stmt = format!("PRAGMA journal_mode = {}", journal_mode);
+                        sqlx::query(&stmt).execute(&mut *conn).await?;
 
-                        if let Some(ms) = busy {
-                            // PRAGMA can't use bind parameters; use a numeric literal.
-                            let ms = std::cmp::min(ms.as_millis(), i64::MAX as u128) as i64;
-                            let stmt = format!("PRAGMA busy_timeout = {ms}");
-                            sqlx::query(&stmt).execute(&mut *conn).await?;
+                        // Apply synchronous mode
+                        let sync_mode = pragmas
+                            .synchronous
+                            .as_ref()
+                            .map(|s| s.as_sql())
+                            .unwrap_or("NORMAL");
+                        let stmt = format!("PRAGMA synchronous = {}", sync_mode);
+                        sqlx::query(&stmt).execute(&mut *conn).await?;
+
+                        // Apply busy timeout (skip for in-memory databases)
+                        if !is_memory {
+                            let timeout = pragmas
+                                .busy_timeout_ms
+                                .unwrap_or(DEFAULT_SQLITE_BUSY_TIMEOUT.into());
+                            sqlx::query("PRAGMA busy_timeout = ?")
+                                .bind(timeout)
+                                .execute(&mut *conn)
+                                .await?;
                         }
 
                         Ok(())
                     })
                 });
 
-                let pool = o.connect(&dsn).await?;
-                // No extra call to apply_sqlite_pragmas here anymore.
+                let pool = o.connect(&clean_dsn).await?;
                 #[cfg(feature = "sea-orm")]
                 let sea = SqlxSqliteConnector::from_sqlx_sqlite_pool(pool.clone());
 
                 Ok(Self {
                     engine,
                     pool: DbPool::Sqlite(pool),
-                    dsn: dsn.to_string(),
+                    dsn: clean_dsn,
                     #[cfg(feature = "sea-orm")]
                     sea,
                 })
@@ -410,6 +430,11 @@ impl DbHandle {
     /// Get the backend.
     pub fn engine(&self) -> DbEngine {
         self.engine
+    }
+
+    /// Get the DSN used for this connection.
+    pub fn dsn(&self) -> &str {
+        &self.dsn
     }
 
     // --- sqlx accessors ---
@@ -573,57 +598,6 @@ impl DbHandle {
 
 // ===================== helpers =====================
 
-#[cfg(feature = "sqlite")]
-#[allow(dead_code)]
-async fn apply_sqlite_pragmas(pool: &SqlitePool, busy: Option<Duration>) -> Result<()> {
-    // Sane defaults for app DBs; adjust to your needs.
-    sqlx::query("PRAGMA journal_mode = WAL")
-        .execute(pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL")
-        .execute(pool)
-        .await?;
-    if let Some(ms) = busy {
-        // Prefer bound parameter; ensure type fits into i64.
-        let ms = i64::try_from(ms.as_millis()).unwrap_or(i64::MAX);
-        sqlx::query("PRAGMA busy_timeout = ?")
-            .bind(ms)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "sqlite")]
-fn prepare_sqlite_path(dsn: &str, create_dirs: bool) -> Result<String> {
-    // Only try to create directories for plain file paths; ignore :memory: cases.
-    if !create_dirs || dsn.contains(":memory:") {
-        return Ok(dsn.to_string());
-    }
-
-    // This is a pragmatic parser: it handles "sqlite:/path" and "sqlite://path".
-    // For URI forms like "sqlite:file:memdb?..." there is no filesystem dir to create.
-    let raw = if let Some(rest) = dsn.strip_prefix("sqlite://") {
-        rest
-    } else if let Some(rest) = dsn.strip_prefix("sqlite:") {
-        rest
-    } else {
-        dsn
-    };
-
-    // If DSN looks like a plain path (no "file:" scheme or query), create parent dir.
-    if !raw.starts_with("file:") && !raw.contains('?') {
-        if let Some(parent) = std::path::Path::new(raw).parent() {
-            if !parent.as_os_str().is_empty() {
-                // One-time blocking call during startup; acceptable for setup paths.
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-    }
-
-    Ok(dsn.to_string())
-}
-
 // ===================== tests =====================
 
 #[cfg(test)]
@@ -641,10 +615,43 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn test_sqlite_connection_with_pragma_parameters() -> Result<()> {
+        // Test that SQLite connections work with PRAGMA parameters in DSN
+        let dsn = "sqlite::memory:?wal=true&synchronous=NORMAL&busy_timeout=5000&journal_mode=WAL";
+        let opts = ConnectOpts::default();
+        let db = DbHandle::connect(dsn, opts).await?;
+        assert_eq!(db.engine(), DbEngine::Sqlite);
+
+        // Verify that the stored DSN has been cleaned (SQLite parameters removed)
+        // Note: For memory databases, the DSN should still be sqlite::memory: after cleaning
+        assert!(db.dsn == "sqlite::memory:" || db.dsn.starts_with("sqlite::memory:"));
+
+        // Test that we can execute queries (confirming the connection works)
+        let pool = db.sqlx_sqlite().unwrap();
+        sqlx::query("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT INTO test (name) VALUES (?)")
+            .bind("test_value")
+            .execute(pool)
+            .await?;
+
+        let row: (i64, String) = sqlx::query_as("SELECT id, name FROM test WHERE id = 1")
+            .fetch_one(pool)
+            .await?;
+
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, "test_value");
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_backend_detection() {
         assert_eq!(
-            DbHandle::detect("sqlite://test.db").unwrap(),
+            DbHandle::detect("sqlite::memory:").unwrap(),
             DbEngine::Sqlite
         );
         assert_eq!(

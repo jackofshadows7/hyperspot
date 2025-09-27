@@ -594,7 +594,7 @@ where
         od_query: ODataQuery,
         fld_map: &FieldMap<E>,
     ) -> ODataBuildResult<Self> {
-        match od_query.as_ast() {
+        match od_query.filter() {
             Some(ast) => {
                 let cond = expr_to_condition::<E>(ast, fld_map)?;
                 Ok(self.filter(cond))

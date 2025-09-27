@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+integration = []   # gate integration tests
+
 [dependencies]
 # Core dependencies
 anyhow = "1.0"
@@ -36,9 +39,9 @@ once_cell = "1.21"
 
 # Database - SeaORM
 sea-orm = { version = "1.1", features = [
-    "sqlx-sqlite", 
-    "runtime-tokio-rustls", 
-    "macros", 
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "macros",
     "with-chrono",
     "with-uuid"
 ] }
@@ -50,12 +53,13 @@ thiserror = "2.0"
 
 # Local dependencies
 modkit = { path = "../../../libs/modkit" }
-db = { path = "../../../libs/db" }
+modkit-db = { path = "../../../libs/modkit-db", default-features = false, features = ["pg", "sea-orm"] }
 odata-core = { path = "../../../libs/odata-core", features = ["with-utoipa"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 api_ingress = { path = "../../../modules/api_ingress" }
 serde_json = "1.0"
-urlencoding = "2.1"
+testcontainers = "0.25"
+testcontainers-modules = { version = "0.13", features = ["postgres"] }
 

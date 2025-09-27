@@ -108,9 +108,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      # Unit/integration tests; include all features if your project supports it
+      # Unit tests (excluding integration tests)
       - name: cargo test
-        run: cargo test --workspace --all-features --no-fail-fast
+        run: cargo test --workspace --no-fail-fast
 
       # Print sccache stats when active
       - name: sccache stats
@@ -214,3 +214,151 @@ jobs:
           files: lcov.info
           fail_ci_if_error: false
           # token: ${{ secrets.CODECOV_TOKEN }}  # Uncomment if required for private repos
+
+  modkit_db_integration:
+    name: modkit-db integration (backend=${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, pg]   # mysql stays local-only
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      SCCACHE_CACHE_SIZE: "2G"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: 'true'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: modkit-db-${{ matrix.backend }}
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Prepare sccache dir
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/sccache"
+
+      - name: Cache sccache artifacts
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-
+
+      - name: Probe sccache & set RUSTC_WRAPPER
+        shell: bash
+        run: |
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_OK=1" >> "$GITHUB_ENV"
+          else
+            echo "sccache failed, falling back to plain rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_OK=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: docker info
+        run: docker info
+
+      - name: cargo fmt (check)
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (modkit-db only)
+        run: cargo clippy -p modkit-db --all-targets -- -D warnings
+
+      - name: Build modkit-db
+        run: cargo build -p modkit-db --features "${{ matrix.backend }}"
+
+      - name: Test modkit-db (integration)
+        run: cargo test -p modkit-db --features "${{ matrix.backend }},integration" -- --nocapture
+
+      - name: sccache stats
+        if: env.SCCACHE_OK == '1'
+        run: sccache --show-stats
+
+  users_info_integration_pg:
+    name: users_info integration (Postgres)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      SCCACHE_CACHE_SIZE: "2G"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          clean: 'true'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: users-info-pg
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Prepare sccache dir
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/sccache"
+
+      - name: Cache sccache artifacts
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: sccache-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            sccache-${{ runner.os }}-
+
+      - name: Probe sccache & set RUSTC_WRAPPER
+        shell: bash
+        run: |
+          if sccache --start-server >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_OK=1" >> "$GITHUB_ENV"
+          else
+            echo "sccache failed, falling back to plain rustc"
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "SCCACHE_OK=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: docker info
+        run: docker info
+
+      - name: cargo fmt (check)
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (users_info only)
+        run: cargo clippy -p users_info --all-targets -- -D warnings
+
+      - name: Build users_info (pg)
+        run: cargo build -p users_info
+
+      - name: Test users_info with Postgres (integration)
+        run: cargo test -p users_info --features "integration" -- --nocapture
+
+      - name: sccache stats
+        if: env.SCCACHE_OK == '1'
+        run: sccache --show-stats

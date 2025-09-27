@@ -42,3 +42,22 @@ quickstart:
 
 example:
 	cargo run --bin hyperspot-server --features users-info-example -- --config config/quickstart.yaml run
+
+# Integration testing with testcontainers
+.PHONY: test-sqlite test-pg test-mysql test-all test-users-info-pg
+
+# modkit-db only
+test-sqlite:
+	cargo test -p modkit-db --features "sqlite,integration" -- --nocapture
+
+test-pg:
+	cargo test -p modkit-db --features "pg,integration" -- --nocapture
+
+test-mysql:
+	cargo test -p modkit-db --features "mysql,integration" -- --nocapture
+
+test-all: test-sqlite test-pg test-mysql
+
+# example module (Postgres only)
+test-users-info-pg:
+	cargo test -p users_info --features "integration" -- --nocapture

@@ -357,33 +357,18 @@ impl ODataQuery {
         self
     }
 
-    /// Legacy compatibility - get filter as AST
-    pub fn as_ast(&self) -> Option<&ast::Expr> {
+    /// Get filter as AST
+    pub fn filter(&self) -> Option<&ast::Expr> {
         self.filter.as_deref()
     }
 
-    /// Legacy compatibility - check if filter is present
-    pub fn is_some(&self) -> bool {
+    /// Check if filter is present
+    pub fn has_filter(&self) -> bool {
         self.filter.is_some()
     }
 
-    /// Legacy compatibility - check if filter is empty
-    pub fn is_none(&self) -> bool {
-        self.filter.is_none()
-    }
-
-    /// Legacy compatibility - create from filter only
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    /// Legacy compatibility - create from filter only
-    pub fn some(expr: ast::Expr) -> Self {
-        Self::default().with_filter(expr)
-    }
-
-    /// Legacy compatibility - extract filter
-    pub fn into_ast(self) -> Option<ast::Expr> {
+    /// Extract filter into AST
+    pub fn into_filter(self) -> Option<ast::Expr> {
         self.filter.map(|b| *b)
     }
 }
@@ -391,8 +376,8 @@ impl ODataQuery {
 impl From<Option<ast::Expr>> for ODataQuery {
     fn from(opt: Option<ast::Expr>) -> Self {
         match opt {
-            Some(e) => ODataQuery::some(e),
-            None => ODataQuery::none(),
+            Some(e) => Self::default().with_filter(e),
+            None => Self::default(),
         }
     }
 }
