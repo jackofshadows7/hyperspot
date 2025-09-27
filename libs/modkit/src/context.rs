@@ -86,7 +86,9 @@ impl ModuleCtx {
     /// Returns None if the module has no database configuration.
     pub async fn db_async(&self) -> anyhow::Result<Option<Arc<modkit_db::DbHandle>>> {
         match (&self.db_manager, &self.module_name) {
-            (Some(manager), Some(module_name)) => manager.get(module_name).await,
+            (Some(manager), Some(module_name)) => {
+                manager.get(module_name).await.map_err(anyhow::Error::from)
+            }
             _ => Ok(None),
         }
     }
@@ -104,9 +106,13 @@ impl ModuleCtx {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Database manager not available"))?;
 
-        manager.get(module_name).await?.ok_or_else(|| {
-            anyhow::anyhow!("Database is not configured for module '{}'", module_name)
-        })
+        manager
+            .get(module_name)
+            .await
+            .map_err(anyhow::Error::from)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Database is not configured for module '{}'", module_name)
+            })
     }
 
     pub fn client_hub(&self) -> Arc<crate::client_hub::ClientHub> {

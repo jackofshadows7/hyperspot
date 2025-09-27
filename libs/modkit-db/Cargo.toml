@@ -10,7 +10,10 @@ pg = ["sqlx/postgres", "sea-orm?/sqlx-postgres"]
 mysql = ["sqlx/mysql", "sea-orm?/sqlx-mysql"]
 sqlite = ["sqlx/sqlite", "sea-orm?/sqlx-sqlite"]
 sea-orm = ["dep:sea-orm"]
-default = ["sea-orm"]
+integration = []
+
+# Default: sqlite + sea-orm for local development
+default = ["sqlite", "sea-orm"]
 
 [dependencies]
 anyhow = "1"
@@ -41,4 +44,8 @@ figment = { version = "0.10", features = ["yaml", "env"] }
 tempfile = "3"
 dirs = "6"
 serde_yaml = "0.9"
+testcontainers = "0.25"
+testcontainers-modules = { version = "0.13", features = ["postgres", "mysql"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"
 

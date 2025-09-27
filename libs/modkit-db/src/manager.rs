@@ -7,8 +7,7 @@
 
 use crate::config::{DbConnConfig, GlobalDatabaseConfig};
 use crate::options::build_db_handle;
-use crate::DbHandle;
-use anyhow::{Context, Result};
+use crate::{DbError, DbHandle, Result};
 use dashmap::DashMap;
 use figment::Figment;
 use std::path::{Path, PathBuf};
@@ -56,9 +55,18 @@ impl DbManager {
 
         // Build new handle
         if let Some(handle) = self.build_for_module(module).await? {
-            // Cache the handle
-            self.cache.insert(module.to_string(), handle.clone());
-            Ok(Some(handle))
+            // Use entry API to handle race conditions properly
+            match self.cache.entry(module.to_string()) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => {
+                    // Another thread beat us to it, return the cached version
+                    Ok(Some(entry.get().clone()))
+                }
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    // We're first, insert our handle
+                    entry.insert(handle.clone());
+                    Ok(Some(handle))
+                }
+            }
         } else {
             Ok(None)
         }
@@ -96,10 +104,10 @@ impl DbManager {
                 .as_ref()
                 .and_then(|g| g.servers.get(server_name))
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
+                    DbError::InvalidConfig(format!(
                         "Referenced server '{}' not found in global database configuration",
                         server_name
-                    )
+                    ))
                 })?;
 
             cfg = self.merge_server_into_module(cfg, server_cfg.clone());
@@ -110,14 +118,12 @@ impl DbManager {
         cfg = self.finalize_sqlite_paths(cfg, &module_home_dir)?;
 
         // Build the database handle
-        let handle = build_db_handle(cfg, self.global.as_ref())
-            .await
-            .with_context(|| format!("Failed to build database handle for module '{}'", module))?;
+        let handle = build_db_handle(cfg, self.global.as_ref()).await?;
 
         tracing::info!(
             module = %module,
             engine = ?handle.engine(),
-            dsn = %handle.dsn(),
+            dsn = %crate::options::redact_credentials_in_dsn(Some(handle.dsn())),
             "Built database handle for module"
         );
 
@@ -187,12 +193,37 @@ impl DbManager {
     ) -> Result<DbConnConfig> {
         // If file is specified, convert to absolute path under module home
         if let Some(file) = &cfg.file {
-            std::fs::create_dir_all(module_home)
-                .with_context(|| format!("Failed to create module directory: {:?}", module_home))?;
-
             let absolute_path = module_home.join(file);
+
+            // Check auto_provision setting
+            let auto_provision = self
+                .global
+                .as_ref()
+                .and_then(|g| g.auto_provision)
+                .unwrap_or(true); // Default to true for backward compatibility
+
+            if auto_provision {
+                // Create all necessary directories
+                if let Some(parent) = absolute_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(DbError::Io)?;
+                }
+            } else {
+                // When auto_provision is false, check if the directory exists
+                if let Some(parent) = absolute_path.parent() {
+                    if !parent.exists() {
+                        return Err(DbError::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!(
+                                "Directory does not exist and auto_provision is disabled: {:?}",
+                                parent
+                            ),
+                        )));
+                    }
+                }
+            }
+
             cfg.path = Some(absolute_path);
-            // Keep file for reference but path takes precedence in build_db_handle
+            cfg.file = None; // Clear file since path takes precedence and we can't have both
         }
 
         // If path is relative, make it absolute relative to module home

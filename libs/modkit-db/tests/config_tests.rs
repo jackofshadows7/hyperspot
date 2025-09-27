@@ -24,6 +24,7 @@ fn test_dbconnconfig_serialization() {
         pool: Some(PoolCfg {
             max_conns: Some(10),
             acquire_timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
         }),
         server: Some("test_server".to_string()),
     };
@@ -77,6 +78,7 @@ fn test_globaldatabaseconfig_serialization() {
             pool: Some(PoolCfg {
                 max_conns: Some(20),
                 acquire_timeout: Some(Duration::from_secs(10)),
+                ..Default::default()
             }),
             ..Default::default()
         },

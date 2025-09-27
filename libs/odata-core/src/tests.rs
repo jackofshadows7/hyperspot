@@ -249,19 +249,18 @@ mod tests {
             Box::new(Expr::Value(Value::String("test".to_string()))),
         );
 
-        // Test legacy constructors
-        let query = ODataQuery::some(expr.clone());
-        assert!(query.is_some());
-        assert!(!query.is_none());
-        assert!(query.as_ast().is_some());
+        // Test new API
+        let query = ODataQuery::default().with_filter(expr.clone());
+        assert!(query.has_filter());
+        assert!(query.filter().is_some());
 
-        let empty = ODataQuery::none();
-        assert!(empty.is_none());
-        assert!(!empty.is_some());
+        let empty = ODataQuery::default();
+        assert!(!empty.has_filter());
+        assert!(empty.filter().is_none());
 
         // Test conversion
         let from_option = ODataQuery::from(Some(expr));
-        assert!(from_option.is_some());
+        assert!(from_option.has_filter());
     }
 
     #[test]

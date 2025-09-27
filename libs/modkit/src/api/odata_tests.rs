@@ -244,18 +244,18 @@ mod tests {
         use odata_core::ast::*;
 
         let expr = Expr::Identifier("test".to_string());
-        let query = ODataQuery::some(expr);
+        let query = ODataQuery::default().with_filter(expr);
         let odata = OData(query);
 
         // Test Deref
-        assert!(odata.is_some());
+        assert!(odata.has_filter());
 
         // Test AsRef
         let query_ref: &ODataQuery = odata.as_ref();
-        assert!(query_ref.is_some());
+        assert!(query_ref.has_filter());
 
         // Test Into
         let query_back: ODataQuery = odata.into();
-        assert!(query_back.is_some());
+        assert!(query_back.has_filter());
     }
 }

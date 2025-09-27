@@ -1,8 +1,7 @@
 //! Database connection options and configuration types.
 
 use crate::config::{DbConnConfig, GlobalDatabaseConfig, PoolCfg};
-use crate::DbHandle;
-use anyhow::{Context, Result};
+use crate::{DbError, DbHandle, Result};
 use thiserror::Error;
 
 // Pool configuration moved to config.rs
@@ -79,18 +78,11 @@ impl std::fmt::Display for DbConnectOptions {
 
 impl DbConnectOptions {
     /// Connect to the database using the configured options.
-    pub async fn connect(&self, pool: PoolCfg) -> anyhow::Result<crate::DbHandle> {
+    pub async fn connect(&self, pool: PoolCfg) -> Result<crate::DbHandle> {
         match self {
             #[cfg(feature = "sqlite")]
             DbConnectOptions::Sqlite(opts) => {
-                let mut pool_opts = sqlx::sqlite::SqlitePoolOptions::new();
-
-                if let Some(max_conns) = pool.max_conns {
-                    pool_opts = pool_opts.max_connections(max_conns);
-                }
-                if let Some(timeout) = pool.acquire_timeout {
-                    pool_opts = pool_opts.acquire_timeout(timeout);
-                }
+                let pool_opts = pool.apply_sqlite(sqlx::sqlite::SqlitePoolOptions::new());
 
                 let sqlx_pool = pool_opts.connect_with(opts.clone()).await?;
 
@@ -110,14 +102,7 @@ impl DbConnectOptions {
             }
             #[cfg(feature = "pg")]
             DbConnectOptions::Postgres(opts) => {
-                let mut pool_opts = sqlx::postgres::PgPoolOptions::new();
-
-                if let Some(max_conns) = pool.max_conns {
-                    pool_opts = pool_opts.max_connections(max_conns);
-                }
-                if let Some(timeout) = pool.acquire_timeout {
-                    pool_opts = pool_opts.acquire_timeout(timeout);
-                }
+                let pool_opts = pool.apply_pg(sqlx::postgres::PgPoolOptions::new());
 
                 let sqlx_pool = pool_opts.connect_with(opts.clone()).await?;
 
@@ -142,14 +127,7 @@ impl DbConnectOptions {
             }
             #[cfg(feature = "mysql")]
             DbConnectOptions::MySql(opts) => {
-                let mut pool_opts = sqlx::mysql::MySqlPoolOptions::new();
-
-                if let Some(max_conns) = pool.max_conns {
-                    pool_opts = pool_opts.max_connections(max_conns);
-                }
-                if let Some(timeout) = pool.acquire_timeout {
-                    pool_opts = pool_opts.acquire_timeout(timeout);
-                }
+                let pool_opts = pool.apply_mysql(sqlx::mysql::MySqlPoolOptions::new());
 
                 let sqlx_pool = pool_opts.connect_with(opts.clone()).await?;
 
@@ -176,7 +154,7 @@ impl DbConnectOptions {
 
 /// SQLite PRAGMA whitelist and validation.
 pub mod sqlite_pragma {
-    use super::ConnectionOptionsError;
+    use crate::DbError;
     use std::collections::HashMap;
 
     /// Whitelisted SQLite PRAGMA parameters.
@@ -186,12 +164,12 @@ pub mod sqlite_pragma {
     pub fn apply_pragmas(
         mut opts: sqlx::sqlite::SqliteConnectOptions,
         params: &HashMap<String, String>,
-    ) -> Result<sqlx::sqlite::SqliteConnectOptions, ConnectionOptionsError> {
+    ) -> crate::Result<sqlx::sqlite::SqliteConnectOptions> {
         for (key, value) in params {
             let key_lower = key.to_lowercase();
 
             if !ALLOWED_PRAGMAS.contains(&key_lower.as_str()) {
-                return Err(ConnectionOptionsError::UnknownSqlitePragma(key.clone()));
+                return Err(DbError::UnknownSqlitePragma(key.clone()));
             }
 
             match key_lower.as_str() {
@@ -219,11 +197,11 @@ pub mod sqlite_pragma {
     }
 
     /// Validate WAL PRAGMA value.
-    fn validate_wal_pragma(value: &str) -> Result<&'static str, ConnectionOptionsError> {
+    fn validate_wal_pragma(value: &str) -> crate::Result<&'static str> {
         match value.to_lowercase().as_str() {
             "true" | "1" => Ok("WAL"),
             "false" | "0" => Ok("DELETE"),
-            _ => Err(ConnectionOptionsError::InvalidSqlitePragma {
+            _ => Err(DbError::InvalidSqlitePragma {
                 key: "wal".to_string(),
                 message: format!("must be true/false/1/0, got '{}'", value),
             }),
@@ -231,10 +209,10 @@ pub mod sqlite_pragma {
     }
 
     /// Validate synchronous PRAGMA value.
-    fn validate_synchronous_pragma(value: &str) -> Result<String, ConnectionOptionsError> {
+    fn validate_synchronous_pragma(value: &str) -> crate::Result<String> {
         match value.to_uppercase().as_str() {
             "OFF" | "NORMAL" | "FULL" | "EXTRA" => Ok(value.to_uppercase()),
-            _ => Err(ConnectionOptionsError::InvalidSqlitePragma {
+            _ => Err(DbError::InvalidSqlitePragma {
                 key: "synchronous".to_string(),
                 message: format!("must be OFF/NORMAL/FULL/EXTRA, got '{}'", value),
             }),
@@ -242,17 +220,16 @@ pub mod sqlite_pragma {
     }
 
     /// Validate busy_timeout PRAGMA value.
-    fn validate_busy_timeout_pragma(value: &str) -> Result<i64, ConnectionOptionsError> {
-        let timeout =
-            value
-                .parse::<i64>()
-                .map_err(|_| ConnectionOptionsError::InvalidSqlitePragma {
-                    key: "busy_timeout".to_string(),
-                    message: format!("must be a non-negative integer, got '{}'", value),
-                })?;
+    fn validate_busy_timeout_pragma(value: &str) -> crate::Result<i64> {
+        let timeout = value
+            .parse::<i64>()
+            .map_err(|_| DbError::InvalidSqlitePragma {
+                key: "busy_timeout".to_string(),
+                message: format!("must be a non-negative integer, got '{}'", value),
+            })?;
 
         if timeout < 0 {
-            return Err(ConnectionOptionsError::InvalidSqlitePragma {
+            return Err(DbError::InvalidSqlitePragma {
                 key: "busy_timeout".to_string(),
                 message: format!("must be non-negative, got '{}'", timeout),
             });
@@ -262,12 +239,12 @@ pub mod sqlite_pragma {
     }
 
     /// Validate journal_mode PRAGMA value.
-    fn validate_journal_mode_pragma(value: &str) -> Result<String, ConnectionOptionsError> {
+    fn validate_journal_mode_pragma(value: &str) -> crate::Result<String> {
         match value.to_uppercase().as_str() {
             "DELETE" | "WAL" | "MEMORY" | "TRUNCATE" | "PERSIST" | "OFF" => {
                 Ok(value.to_uppercase())
             }
-            _ => Err(ConnectionOptionsError::InvalidSqlitePragma {
+            _ => Err(DbError::InvalidSqlitePragma {
                 key: "journal_mode".to_string(),
                 message: format!(
                     "must be DELETE/WAL/MEMORY/TRUNCATE/PERSIST/OFF, got '{}'",
@@ -301,6 +278,9 @@ pub async fn build_db_handle(
         }
     }
 
+    // Validate configuration for conflicts
+    validate_config_consistency(&cfg)?;
+
     // Determine database type and build connection options
     let is_sqlite = cfg.file.is_some()
         || cfg.path.is_some()
@@ -328,16 +308,13 @@ pub async fn build_db_handle(
     );
 
     // Connect to database
-    let handle = connect_options
-        .connect(pool_cfg)
-        .await
-        .context("Failed to connect to database")?;
+    let handle = connect_options.connect(pool_cfg).await?;
 
     Ok(handle)
 }
 
 /// Build SQLite connection options from configuration.
-fn build_sqlite_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, ConnectionOptionsError> {
+fn build_sqlite_options(cfg: &DbConnConfig) -> Result<DbConnectOptions> {
     #[cfg(feature = "sqlite")]
     {
         let db_path = if let Some(dsn) = &cfg.dsn {
@@ -346,11 +323,11 @@ fn build_sqlite_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
             path.clone()
         } else if let Some(_file) = &cfg.file {
             // This should not happen as manager.rs should have resolved file to path
-            return Err(ConnectionOptionsError::InvalidParameter(
+            return Err(DbError::InvalidParameter(
                 "File path should have been resolved to absolute path".to_string(),
             ));
         } else {
-            return Err(ConnectionOptionsError::InvalidParameter(
+            return Err(DbError::InvalidParameter(
                 "SQLite connection requires either DSN, path, or file".to_string(),
             ));
         };
@@ -373,14 +350,12 @@ fn build_sqlite_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
     }
     #[cfg(not(feature = "sqlite"))]
     {
-        Err(ConnectionOptionsError::FeatureDisabled(
-            "SQLite feature not enabled",
-        ))
+        Err(DbError::FeatureDisabled("SQLite feature not enabled"))
     }
 }
 
 /// Build server-based connection options from configuration.
-fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, ConnectionOptionsError> {
+fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions> {
     // Determine the database type from DSN or default to PostgreSQL
     let scheme = if let Some(dsn) = &cfg.dsn {
         let parsed = url::Url::parse(dsn)?;
@@ -395,7 +370,7 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
             {
                 let mut opts = if let Some(dsn) = &cfg.dsn {
                     dsn.parse::<sqlx::postgres::PgConnectOptions>()
-                        .map_err(|e| ConnectionOptionsError::InvalidParameter(e.to_string()))?
+                        .map_err(|e| DbError::InvalidParameter(e.to_string()))?
                 } else {
                     sqlx::postgres::PgConnectOptions::new()
                 };
@@ -416,7 +391,7 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
                 if let Some(dbname) = &cfg.dbname {
                     opts = opts.database(dbname);
                 } else if cfg.dsn.is_none() {
-                    return Err(ConnectionOptionsError::InvalidParameter(
+                    return Err(DbError::InvalidParameter(
                         "dbname is required for PostgreSQL connections".to_string(),
                     ));
                 }
@@ -432,9 +407,7 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
             }
             #[cfg(not(feature = "pg"))]
             {
-                Err(ConnectionOptionsError::FeatureDisabled(
-                    "PostgreSQL feature not enabled",
-                ))
+                Err(DbError::FeatureDisabled("PostgreSQL feature not enabled"))
             }
         }
         "mysql" => {
@@ -442,7 +415,7 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
             {
                 let mut opts = if let Some(dsn) = &cfg.dsn {
                     dsn.parse::<sqlx::mysql::MySqlConnectOptions>()
-                        .map_err(|e| ConnectionOptionsError::InvalidParameter(e.to_string()))?
+                        .map_err(|e| DbError::InvalidParameter(e.to_string()))?
                 } else {
                     sqlx::mysql::MySqlConnectOptions::new()
                 };
@@ -463,7 +436,7 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
                 if let Some(dbname) = &cfg.dbname {
                     opts = opts.database(dbname);
                 } else if cfg.dsn.is_none() {
-                    return Err(ConnectionOptionsError::InvalidParameter(
+                    return Err(DbError::InvalidParameter(
                         "dbname is required for MySQL connections".to_string(),
                     ));
                 }
@@ -472,12 +445,10 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
             }
             #[cfg(not(feature = "mysql"))]
             {
-                Err(ConnectionOptionsError::FeatureDisabled(
-                    "MySQL feature not enabled",
-                ))
+                Err(DbError::FeatureDisabled("MySQL feature not enabled"))
             }
         }
-        _ => Err(ConnectionOptionsError::InvalidParameter(format!(
+        _ => Err(DbError::InvalidParameter(format!(
             "Unsupported database scheme: {}",
             scheme
         ))),
@@ -485,7 +456,7 @@ fn build_server_options(cfg: &DbConnConfig) -> Result<DbConnectOptions, Connecti
 }
 
 /// Parse SQLite path from DSN.
-fn parse_sqlite_path_from_dsn(dsn: &str) -> Result<std::path::PathBuf, ConnectionOptionsError> {
+fn parse_sqlite_path_from_dsn(dsn: &str) -> Result<std::path::PathBuf> {
     if dsn.starts_with("sqlite:") {
         let path_part = dsn.strip_prefix("sqlite:").unwrap();
         let path_part = if path_part.starts_with("//") {
@@ -503,7 +474,7 @@ fn parse_sqlite_path_from_dsn(dsn: &str) -> Result<std::path::PathBuf, Connectio
 
         Ok(std::path::PathBuf::from(path_part))
     } else {
-        Err(ConnectionOptionsError::InvalidParameter(format!(
+        Err(DbError::InvalidParameter(format!(
             "Invalid SQLite DSN: {}",
             dsn
         )))
@@ -518,8 +489,7 @@ fn expand_env_vars(input: &str) -> Result<String> {
     for caps in re.captures_iter(input) {
         let full_match = &caps[0];
         let var_name = &caps[1];
-        let value = std::env::var(var_name)
-            .with_context(|| format!("Environment variable '{}' not found", var_name))?;
+        let value = std::env::var(var_name)?;
         result = result.replace(full_match, &value);
     }
 
@@ -530,11 +500,61 @@ fn expand_env_vars(input: &str) -> Result<String> {
 fn resolve_password(password: &str) -> Result<String> {
     if password.starts_with("${") && password.ends_with('}') {
         let var_name = &password[2..password.len() - 1];
-        std::env::var(var_name)
-            .with_context(|| format!("Environment variable '{}' not found for password", var_name))
+        Ok(std::env::var(var_name)?)
     } else {
         Ok(password.to_string())
     }
+}
+
+/// Validate configuration for consistency and detect conflicts.
+fn validate_config_consistency(cfg: &DbConnConfig) -> Result<()> {
+    // Check for SQLite vs server engine conflicts
+    if let Some(dsn) = &cfg.dsn {
+        let is_sqlite_dsn = dsn.starts_with("sqlite");
+        let has_sqlite_fields = cfg.file.is_some() || cfg.path.is_some();
+        let has_server_fields = cfg.host.is_some() || cfg.port.is_some();
+
+        if is_sqlite_dsn && has_server_fields {
+            return Err(DbError::ConfigConflict(
+                "SQLite DSN cannot be used with host/port fields".to_string(),
+            ));
+        }
+
+        if !is_sqlite_dsn && has_sqlite_fields {
+            return Err(DbError::ConfigConflict(
+                "Non-SQLite DSN cannot be used with file/path fields".to_string(),
+            ));
+        }
+
+        // Check for server vs non-server DSN conflicts
+        if !is_sqlite_dsn && cfg.server.is_some() {
+            // This is actually allowed - server provides base config, DSN can override
+            // But let's check for meaningful conflicts
+            if cfg.host.is_some()
+                || cfg.port.is_some()
+                || cfg.user.is_some()
+                || cfg.password.is_some()
+                || cfg.dbname.is_some()
+            {
+                // This is fine - fields override DSN parts
+            }
+        }
+    }
+
+    // Check for SQLite-specific conflicts
+    if cfg.file.is_some() && cfg.path.is_some() {
+        return Err(DbError::ConfigConflict(
+            "Cannot specify both 'file' and 'path' for SQLite - use one or the other".to_string(),
+        ));
+    }
+
+    if (cfg.file.is_some() || cfg.path.is_some()) && (cfg.host.is_some() || cfg.port.is_some()) {
+        return Err(DbError::ConfigConflict(
+            "SQLite file/path fields cannot be used with host/port fields".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Redact credentials from DSN for logging.

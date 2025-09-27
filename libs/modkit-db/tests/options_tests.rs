@@ -77,9 +77,7 @@ async fn test_build_db_handle_invalid_env_var() {
     assert!(result.is_err());
 
     let error = result.unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("Environment variable 'NONEXISTENT_VAR' not found"));
+    assert!(error.to_string().contains("environment variable not found"));
 }
 
 #[tokio::test]
@@ -130,6 +128,7 @@ async fn test_build_db_handle_pool_config() {
         pool: Some(PoolCfg {
             max_conns: Some(5),
             acquire_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -145,6 +144,7 @@ async fn test_build_db_handle_pool_config() {
 #[tokio::test]
 async fn test_build_db_handle_postgres_missing_dbname() {
     let config = DbConnConfig {
+        server: Some("postgres".to_string()),
         host: Some("localhost".to_string()),
         port: Some(5432),
         user: Some("testuser".to_string()),
@@ -157,6 +157,7 @@ async fn test_build_db_handle_postgres_missing_dbname() {
     assert!(result.is_err());
 
     let error = result.unwrap_err();
+    println!("Actual error: {}", error);
     assert!(error
         .to_string()
         .contains("dbname is required for PostgreSQL connections"));
