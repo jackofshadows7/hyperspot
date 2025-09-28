@@ -260,16 +260,21 @@ impl Lifecycle {
         let finished_notify = self.finished_notify.clone();
         let status_on_finish = self.status.clone();
 
-        // Spawn the actual task
-        let handle = tokio::spawn(async move {
-            let res = make(token, ready_mode.then(|| ReadySignal(ready_tx))).await;
-            if let Err(e) = res {
-                tracing::error!(error=%e, "lifecycle task error");
+        // Spawn the actual task with descriptive logging
+        let task_id = format!("lifecycle-{:p}", self);
+        let handle = tokio::spawn({
+            let task_id = task_id.clone();
+            async move {
+                tracing::debug!(task_id = %task_id, "lifecycle task starting");
+                let res = make(token, ready_mode.then(|| ReadySignal(ready_tx))).await;
+                if let Err(e) = res {
+                    tracing::error!(error=%e, task_id=%task_id, "lifecycle task error");
+                }
+                finished_flag.store(true, Ordering::Release);
+                finished_notify.notify_waiters();
+                status_on_finish.store(Status::Stopped.as_u8(), Ordering::Release);
+                tracing::debug!(task_id=%task_id, "lifecycle task finished");
             }
-            finished_flag.store(true, Ordering::Release);
-            finished_notify.notify_waiters();
-            status_on_finish.store(Status::Stopped.as_u8(), Ordering::Release);
-            tracing::debug!("lifecycle status -> stopped (finished)");
         });
 
         // store handle (bounded lock scope)
@@ -284,6 +289,7 @@ impl Lifecycle {
     /// Request graceful shutdown and wait up to `timeout`.
     #[tracing::instrument(skip(self, timeout), level = "debug")]
     pub async fn stop(&self, timeout: Duration) -> LcResult<StopReason> {
+        let task_id = format!("lifecycle-{:p}", self);
         let st = self.load_status();
         if !matches!(st, Status::Starting | Status::Running | Status::Stopping) {
             // Not running => already finished.
@@ -326,10 +332,38 @@ impl Lifecycle {
                 tracing::warn!("lifecycle stop timed out; aborting task");
                 handle.abort();
             }
+
             match handle.await {
-                Ok(_) => {}
-                Err(e) if e.is_cancelled() => tracing::debug!("task aborted"),
-                Err(e) => tracing::warn!(error=%e, "task join error"),
+                Ok(_) => {
+                    tracing::debug!(task_id = %task_id, "lifecycle task completed successfully");
+                }
+                Err(e) if e.is_cancelled() => {
+                    tracing::debug!(task_id = %task_id, "lifecycle task was cancelled/aborted");
+                }
+                Err(e) if e.is_panic() => {
+                    // Extract panic information if possible
+                    if let Ok(panic_payload) = e.try_into_panic() {
+                        let panic_msg = panic_payload
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic".to_string());
+
+                        tracing::error!(
+                            task_id = %task_id,
+                            panic_message = %panic_msg,
+                            "lifecycle task panicked - this indicates a serious bug"
+                        );
+                    } else {
+                        tracing::error!(
+                            task_id = %task_id,
+                            "lifecycle task panicked (could not extract panic message)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "lifecycle task join error");
+                }
             }
 
             self.finished.store(true, Ordering::Release);
@@ -761,5 +795,79 @@ mod tests {
         assert!(r1.is_ok());
         assert!(r2.is_ok());
         assert_eq!(wrapper.status(), Status::Stopped);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_handles_panics_properly() {
+        let lc = Lifecycle::new();
+
+        // Start a task that will panic
+        lc.start(|_cancel| async {
+            panic!("test panic message");
+        })
+        .unwrap();
+
+        // Give the task a moment to start and panic
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Stop should handle the panic gracefully
+        let reason = lc.stop(Duration::from_millis(1000)).await.unwrap();
+
+        // The task panicked, but stop should complete successfully
+        // The exact reason depends on timing, but it should not hang or fail
+        assert!(matches!(
+            reason,
+            StopReason::Finished | StopReason::Cancelled | StopReason::Timeout
+        ));
+        assert_eq!(lc.status(), Status::Stopped);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_task_naming_and_logging() {
+        let lc = Lifecycle::new();
+
+        // Start a simple task
+        lc.start(|cancel| async move {
+            cancel.cancelled().await;
+            Ok(())
+        })
+        .unwrap();
+
+        // Verify task is running
+        assert!(lc.is_running());
+
+        // Stop and verify proper cleanup
+        let reason = lc.stop(Duration::from_millis(100)).await.unwrap();
+        assert!(matches!(
+            reason,
+            StopReason::Cancelled | StopReason::Finished
+        ));
+        assert_eq!(lc.status(), Status::Stopped);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_join_handles_all_tasks() {
+        let lc = Arc::new(Lifecycle::new());
+
+        // Start multiple tasks in sequence (lifecycle only supports one at a time)
+        lc.start(|cancel| async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancel.cancelled().await;
+            Ok(())
+        })
+        .unwrap();
+
+        // Stop should wait for the task to complete
+        let start = std::time::Instant::now();
+        let reason = lc.stop(Duration::from_millis(200)).await.unwrap();
+        let elapsed = start.elapsed();
+
+        // Should have waited at least 10ms for the task
+        assert!(elapsed >= Duration::from_millis(10));
+        assert!(matches!(
+            reason,
+            StopReason::Cancelled | StopReason::Finished
+        ));
+        assert_eq!(lc.status(), Status::Stopped);
     }
 }

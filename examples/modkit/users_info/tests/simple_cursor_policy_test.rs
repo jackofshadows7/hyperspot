@@ -37,11 +37,11 @@ async fn test_cursor_orderby_policy_validation() {
 
 #[test]
 fn test_order_with_cursor_error_mapping() {
-    use odata_core::ODataPageError;
+    use odata_core::Error as ODataError;
     use users_info::contract::error::UsersInfoError;
 
     // Test that OrderWithCursor error maps properly
-    let page_error = ODataPageError::OrderWithCursor;
+    let page_error = ODataError::OrderWithCursor;
     let users_error: UsersInfoError = page_error.into();
 
     match users_error {

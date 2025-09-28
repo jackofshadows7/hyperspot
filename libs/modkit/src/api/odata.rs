@@ -1,16 +1,16 @@
 use axum::extract::{FromRequestParts, Query};
 use axum::http::request::Parts;
-use odata_core::{ast, CursorV1, ODataOrderBy, ODataPageError, OrderKey, SortDir};
+use odata_core::{ast, CursorV1, Error as ODataError, ODataOrderBy, OrderKey, SortDir};
 use odata_params::filters as od;
 use serde::Deserialize;
 
 // Re-export types from odata-core for convenience and better DX
-pub use odata_core::{CursorError, ODataQuery};
+pub use odata_core::ODataQuery;
 // CursorV1 is available through the private import above for internal use
 
 // Re-export error mapping from the error module
 pub mod error;
-pub use error::odata_page_error_to_problem;
+pub use error::odata_error_to_problem;
 
 #[derive(Deserialize, Default)]
 pub struct ODataParams {
@@ -30,14 +30,14 @@ pub const MAX_ORDER_FIELDS: usize = 10;
 /// Parse $orderby string into ODataOrderBy
 /// Format: "field1 [asc|desc], field2 [asc|desc], ..."
 /// Default direction is asc if not specified
-pub fn parse_orderby(raw: &str) -> Result<ODataOrderBy, odata_core::ODataPageError> {
+pub fn parse_orderby(raw: &str) -> Result<ODataOrderBy, odata_core::Error> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(ODataOrderBy::empty());
     }
 
     if raw.len() > MAX_ORDERBY_LEN {
-        return Err(odata_core::ODataPageError::InvalidOrderByField(
+        return Err(odata_core::Error::InvalidOrderByField(
             "orderby too long".into(),
         ));
     }
@@ -56,7 +56,7 @@ pub fn parse_orderby(raw: &str) -> Result<ODataOrderBy, odata_core::ODataPageErr
             [field, "asc"] => (*field, SortDir::Asc),
             [field, "desc"] => (*field, SortDir::Desc),
             _ => {
-                return Err(odata_core::ODataPageError::InvalidOrderByField(format!(
+                return Err(odata_core::Error::InvalidOrderByField(format!(
                     "invalid orderby clause: {}",
                     part
                 )))
@@ -64,7 +64,7 @@ pub fn parse_orderby(raw: &str) -> Result<ODataOrderBy, odata_core::ODataPageErr
         };
 
         if field.is_empty() {
-            return Err(odata_core::ODataPageError::InvalidOrderByField(
+            return Err(odata_core::Error::InvalidOrderByField(
                 "empty field name in orderby".into(),
             ));
         }
@@ -76,7 +76,7 @@ pub fn parse_orderby(raw: &str) -> Result<ODataOrderBy, odata_core::ODataPageErr
     }
 
     if keys.len() > MAX_ORDER_FIELDS {
-        return Err(odata_core::ODataPageError::InvalidOrderByField(
+        return Err(odata_core::Error::InvalidOrderByField(
             "too many order fields".into(),
         ));
     }
@@ -144,8 +144,8 @@ where
 
     // Check for cursor+orderby conflict before parsing either
     if params.cursor.is_some() && params.orderby.is_some() {
-        return Err(crate::api::odata::odata_page_error_to_problem(
-            &ODataPageError::OrderWithCursor,
+        return Err(crate::api::odata::odata_error_to_problem(
+            &ODataError::OrderWithCursor,
             "/",
         ));
     }
@@ -153,7 +153,7 @@ where
     // Parse cursor first (if present, skip orderby)
     if let Some(cursor_str) = params.cursor.as_ref() {
         let cursor = CursorV1::decode(cursor_str).map_err(|_| {
-            crate::api::odata::odata_page_error_to_problem(&ODataPageError::InvalidCursor, "/")
+            crate::api::odata::odata_error_to_problem(&ODataError::InvalidCursor, "/")
         })?;
         query = query.with_cursor(cursor);
         // When cursor is present, order is empty (derived from cursor.s later)
@@ -162,7 +162,7 @@ where
         // Parse orderby only when cursor is absent
         if let Some(raw_orderby) = params.orderby.as_ref() {
             let order = parse_orderby(raw_orderby)
-                .map_err(|e| crate::api::odata::odata_page_error_to_problem(&e, "/"))?;
+                .map_err(|e| crate::api::odata::odata_error_to_problem(&e, "/"))?;
             query = query.with_order(order);
         }
     }
@@ -170,8 +170,8 @@ where
     // Parse limit
     if let Some(limit) = params.limit {
         if limit == 0 {
-            return Err(crate::api::odata::odata_page_error_to_problem(
-                &ODataPageError::InvalidLimit,
+            return Err(crate::api::odata::odata_error_to_problem(
+                &ODataError::InvalidLimit,
                 "/",
             ));
         }

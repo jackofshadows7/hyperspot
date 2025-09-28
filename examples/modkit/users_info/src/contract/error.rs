@@ -55,15 +55,18 @@ impl From<crate::domain::error::DomainError> for UsersInfoError {
     }
 }
 
-// Add back ODataPageError conversion for compatibility with gateway layer
-impl From<odata_core::ODataPageError> for UsersInfoError {
-    fn from(page_error: odata_core::ODataPageError) -> Self {
-        use odata_core::ODataPageError::*;
-        match page_error {
+// Convert OData errors to contract-safe errors
+impl From<odata_core::Error> for UsersInfoError {
+    fn from(odata_error: odata_core::Error) -> Self {
+        use odata_core::Error::*;
+        match odata_error {
+            // Filter and OrderBy parsing errors
             InvalidFilter(msg) => Self::validation(format!("Invalid filter: {}", msg)),
             InvalidOrderByField(field) => {
                 Self::validation(format!("Invalid orderby field: {}", field))
             }
+
+            // Pagination and cursor validation errors
             OrderMismatch => Self::validation("Order mismatch".to_string()),
             FilterMismatch => Self::validation("Filter mismatch".to_string()),
             InvalidCursor => Self::validation("Invalid cursor".to_string()),
@@ -71,6 +74,16 @@ impl From<odata_core::ODataPageError> for UsersInfoError {
             OrderWithCursor => {
                 Self::validation("Cannot specify both orderby and cursor".to_string())
             }
+
+            // Cursor parsing errors (all validation issues from client perspective)
+            CursorInvalidBase64 => Self::validation("Invalid cursor encoding".to_string()),
+            CursorInvalidJson => Self::validation("Malformed cursor data".to_string()),
+            CursorInvalidVersion => Self::validation("Unsupported cursor version".to_string()),
+            CursorInvalidKeys => Self::validation("Invalid cursor keys".to_string()),
+            CursorInvalidFields => Self::validation("Invalid cursor fields".to_string()),
+            CursorInvalidDirection => Self::validation("Invalid cursor direction".to_string()),
+
+            // Database and low-level errors (don't expose internal details)
             Db(_) => Self::internal(),
         }
     }

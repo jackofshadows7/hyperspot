@@ -68,7 +68,7 @@ impl Service {
     pub async fn list_users_page(
         &self,
         query: ODataQuery,
-    ) -> Result<Page<User>, odata_core::ODataPageError> {
+    ) -> Result<Page<User>, odata_core::Error> {
         debug!("Listing users with cursor pagination");
 
         // All validation is now handled centrally in paginate_with_odata

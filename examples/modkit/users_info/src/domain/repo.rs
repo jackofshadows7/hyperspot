@@ -1,6 +1,6 @@
 use crate::contract::model::User;
 use async_trait::async_trait;
-use odata_core::ODataPageError;
+use odata_core::Error as ODataError;
 use odata_core::{ODataQuery, Page};
 use uuid::Uuid;
 
@@ -21,6 +21,6 @@ pub trait UsersRepository: Send + Sync {
     /// Delete by id. Returns true if a row was deleted.
     async fn delete(&self, id: Uuid) -> anyhow::Result<bool>;
     /// List with cursor-based pagination - returns page envelope
-    /// Now uses centralized ODataPageError for all pagination/sorting errors
-    async fn list_users_page(&self, query: &ODataQuery) -> Result<Page<User>, ODataPageError>;
+    /// Uses unified OData error type for all pagination/sorting errors
+    async fn list_users_page(&self, query: &ODataQuery) -> Result<Page<User>, ODataError>;
 }

@@ -84,8 +84,8 @@ impl ODataOrderBy {
     }
 
     /// Parse signed tokens back to ODataOrderBy (e.g. "+a,-b" -> ODataOrderBy)
-    /// Returns ODataPageError for stricter validation used in cursor processing
-    pub fn from_signed_tokens(signed: &str) -> Result<Self, ODataPageError> {
+    /// Returns Error for stricter validation used in cursor processing
+    pub fn from_signed_tokens(signed: &str) -> Result<Self, Error> {
         let mut out = Vec::new();
         for seg in signed.split(',') {
             let seg = seg.trim();
@@ -98,7 +98,7 @@ impl ODataOrderBy {
                 _ => (SortDir::Asc, seg), // default '+'
             };
             if name.is_empty() {
-                return Err(ODataPageError::InvalidOrderByField(seg.to_string()));
+                return Err(Error::InvalidOrderByField(seg.to_string()));
             }
             out.push(OrderKey {
                 field: name.to_string(),
@@ -106,7 +106,7 @@ impl ODataOrderBy {
             });
         }
         if out.is_empty() {
-            return Err(ODataPageError::InvalidOrderByField("empty order".into()));
+            return Err(Error::InvalidOrderByField("empty order".into()));
         }
         Ok(ODataOrderBy(out))
     }
@@ -173,15 +173,21 @@ impl std::fmt::Display for ODataOrderBy {
     }
 }
 
-/// Central error enum for OData pagination and sorting operations
+/// Unified error type for all OData operations
+///
+/// This centralizes all OData-related errors including parsing, validation,
+/// pagination, and cursor operations into a single error type using thiserror.
 #[derive(thiserror::Error, Debug, Clone)]
-pub enum ODataPageError {
+pub enum Error {
+    // Filter parsing and validation errors
     #[error("invalid $filter: {0}")]
     InvalidFilter(String),
 
+    // OrderBy parsing and validation errors
     #[error("unsupported $orderby field: {0}")]
     InvalidOrderByField(String),
 
+    // Pagination and cursor errors
     #[error("ORDER_MISMATCH")]
     OrderMismatch,
 
@@ -197,7 +203,27 @@ pub enum ODataPageError {
     #[error("ORDER_WITH_CURSOR")]
     OrderWithCursor,
 
-    #[error("DB: {0}")]
+    // Cursor parsing errors (previously CursorError variants)
+    #[error("invalid cursor: invalid base64url encoding")]
+    CursorInvalidBase64,
+
+    #[error("invalid cursor: malformed JSON")]
+    CursorInvalidJson,
+
+    #[error("invalid cursor: unsupported version")]
+    CursorInvalidVersion,
+
+    #[error("invalid cursor: empty or invalid keys")]
+    CursorInvalidKeys,
+
+    #[error("invalid cursor: empty or invalid fields")]
+    CursorInvalidFields,
+
+    #[error("invalid cursor: invalid sort direction")]
+    CursorInvalidDirection,
+
+    // Database and low-level errors
+    #[error("database error: {0}")]
     Db(String),
 }
 
@@ -206,13 +232,13 @@ pub fn validate_cursor_against(
     cursor: &CursorV1,
     effective_order: &ODataOrderBy,
     effective_filter_hash: Option<&str>,
-) -> Result<(), ODataPageError> {
+) -> Result<(), Error> {
     if !effective_order.equals_signed_tokens(&cursor.s) {
-        return Err(ODataPageError::OrderMismatch);
+        return Err(Error::OrderMismatch);
     }
     if let (Some(h), Some(cf)) = (effective_filter_hash, cursor.f.as_deref()) {
         if h != cf {
-            return Err(ODataPageError::FilterMismatch);
+            return Err(Error::FilterMismatch);
         }
     }
     Ok(())
@@ -225,22 +251,6 @@ pub struct CursorV1 {
     pub o: SortDir,
     pub s: String,
     pub f: Option<String>,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum CursorError {
-    #[error("invalid base64url")]
-    InvalidBase64,
-    #[error("invalid json")]
-    InvalidJson,
-    #[error("invalid version")]
-    InvalidVersion,
-    #[error("invalid keys")]
-    InvalidKeys,
-    #[error("invalid fields")]
-    InvalidFields,
-    #[error("invalid direction")]
-    InvalidDirection,
 }
 
 impl CursorV1 {
@@ -269,7 +279,8 @@ impl CursorV1 {
         base64_url::encode(&json)
     }
 
-    pub fn decode(token: &str) -> Result<Self, CursorError> {
+    /// Decode cursor from base64url token
+    pub fn decode(token: &str) -> Result<Self, Error> {
         #[derive(serde::Deserialize)]
         struct Wire {
             v: u8,
@@ -279,21 +290,21 @@ impl CursorV1 {
             #[serde(default)]
             f: Option<String>,
         }
-        let bytes = base64_url::decode(token).map_err(|_| CursorError::InvalidBase64)?;
-        let w: Wire = serde_json::from_slice(&bytes).map_err(|_| CursorError::InvalidJson)?;
+        let bytes = base64_url::decode(token).map_err(|_| Error::CursorInvalidBase64)?;
+        let w: Wire = serde_json::from_slice(&bytes).map_err(|_| Error::CursorInvalidJson)?;
         if w.v != 1 {
-            return Err(CursorError::InvalidVersion);
+            return Err(Error::CursorInvalidVersion);
         }
         let o = match w.o.as_str() {
             "asc" => SortDir::Asc,
             "desc" => SortDir::Desc,
-            _ => return Err(CursorError::InvalidDirection),
+            _ => return Err(Error::CursorInvalidDirection),
         };
         if w.k.is_empty() {
-            return Err(CursorError::InvalidKeys);
+            return Err(Error::CursorInvalidKeys);
         }
         if w.s.trim().is_empty() {
-            return Err(CursorError::InvalidFields);
+            return Err(Error::CursorInvalidFields);
         }
         Ok(CursorV1 {
             k: w.k,

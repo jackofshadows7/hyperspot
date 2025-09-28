@@ -5,6 +5,7 @@
 //! response are specified.
 
 pub mod error;
+pub mod error_layer;
 pub mod odata;
 pub mod odata_policy_tests;
 pub mod operation_builder;
@@ -12,6 +13,9 @@ pub mod pagination;
 pub mod problem;
 
 pub use error::ApiError;
+pub use error_layer::{
+    error_mapping_middleware, extract_trace_id, map_error_to_problem, IntoProblemResponse,
+};
 pub use operation_builder::{
     ensure_schema, state, Missing, OpenApiRegistry, OperationBuilder, OperationSpec, ParamLocation,
     ParamSpec, Present, ResponseSpec,

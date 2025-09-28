@@ -30,7 +30,10 @@ pub use inventory;
 // Module system exports
 pub use crate::contracts::*;
 pub mod context;
-pub use context::{ConfigProvider, ModuleCtx, ModuleCtxBuilder};
+pub use context::{
+    module_config_typed, ConfigError, ConfigProvider, ConfigProviderExt, ModuleCtx,
+    ModuleCtxBuilder,
+};
 
 // Module system implementations for macro code
 pub mod client_hub;
@@ -47,7 +50,7 @@ pub use modkit_macros::{lifecycle, module};
 pub mod contracts;
 // Type-safe API operation builder
 pub mod api;
-pub use api::{OpenApiRegistry, OperationBuilder};
+pub use api::{error_mapping_middleware, IntoProblemResponse, OpenApiRegistry, OperationBuilder};
 pub use odata_core::{Page, PageInfo};
 
 // HTTP utilities
