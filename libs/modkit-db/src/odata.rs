@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::{NaiveDate, NaiveTime, Utc};
-use odata_core::{ast as core, CursorV1, ODataOrderBy, ODataPageError, ODataQuery, SortDir};
+use odata_core::{ast as core, CursorV1, Error as ODataError, ODataOrderBy, ODataQuery, SortDir};
 use rust_decimal::Decimal;
 use sea_orm::{
     sea_query::{Expr, Order},
@@ -414,10 +414,10 @@ where
 fn resolve_field<'a, E: EntityTrait>(
     fld_map: &'a FieldMap<E>,
     name: &str,
-) -> Result<&'a Field<E>, ODataPageError> {
+) -> Result<&'a Field<E>, ODataError> {
     fld_map
         .get(name)
-        .ok_or_else(|| ODataPageError::InvalidOrderByField(name.to_string()))
+        .ok_or_else(|| ODataError::InvalidOrderByField(name.to_string()))
 }
 
 /* ---------- tiebreaker handling ---------- */
@@ -436,12 +436,12 @@ pub fn build_cursor_for_model<E: EntityTrait>(
     fmap: &FieldMap<E>,
     primary_dir: SortDir,
     filter_hash: Option<String>,
-) -> Result<CursorV1, ODataPageError> {
+) -> Result<CursorV1, ODataError> {
     let mut k = Vec::with_capacity(order.0.len());
     for key in &order.0 {
         let s = fmap
             .encode_model_key(model, &key.field)
-            .ok_or_else(|| ODataPageError::InvalidOrderByField(key.field.clone()))?;
+            .ok_or_else(|| ODataError::InvalidOrderByField(key.field.clone()))?;
         k.push(s);
     }
     Ok(CursorV1 {
@@ -674,7 +674,7 @@ pub trait ODataOrderPageExt<E: EntityTrait>: Sized {
         self,
         order: &ODataOrderBy,
         fld_map: &FieldMap<E>,
-    ) -> Result<Self, ODataPageError>;
+    ) -> Result<Self, ODataError>;
 }
 
 impl<E> ODataOrderPageExt<E> for sea_orm::Select<E>
@@ -686,7 +686,7 @@ where
         self,
         order: &ODataOrderBy,
         fld_map: &FieldMap<E>,
-    ) -> Result<Self, ODataPageError> {
+    ) -> Result<Self, ODataError> {
         let mut query = self;
 
         for order_key in &order.0 {
@@ -759,7 +759,7 @@ pub struct LimitCfg {
     pub max: u64,
 }
 
-pub fn clamp_limit(req: Option<u64>, cfg: LimitCfg) -> Result<u64, ODataPageError> {
+pub fn clamp_limit(req: Option<u64>, cfg: LimitCfg) -> Result<u64, ODataError> {
     let mut l = req.unwrap_or(cfg.default);
     if l == 0 {
         l = 1;
@@ -779,7 +779,7 @@ pub async fn paginate_with_odata<E, D, F, C>(
     tiebreaker: (&str, SortDir), // e.g. ("id", SortDir::Desc)
     limit_cfg: LimitCfg,         // e.g. { default: 25, max: 1000 }
     model_to_domain: F,
-) -> Result<Page<D>, ODataPageError>
+) -> Result<Page<D>, ODataError>
 where
     E: EntityTrait,
     E::Column: ColumnTrait + Copy,
@@ -793,7 +793,7 @@ where
     let effective_order = if let Some(cur) = &q.cursor {
         // Derive order from the cursor's signed tokens
         odata_core::ODataOrderBy::from_signed_tokens(&cur.s)
-            .map_err(|_| ODataPageError::InvalidCursor)?
+            .map_err(|_| ODataError::InvalidCursor)?
     } else {
         // Use client order; ensure tiebreaker
         q.order
@@ -806,7 +806,7 @@ where
         // Only filter hash validation is necessary now
         if let (Some(h), Some(cf)) = (q.filter_hash.as_deref(), cur.f.as_deref()) {
             if h != cf {
-                return Err(ODataPageError::FilterMismatch);
+                return Err(ODataError::FilterMismatch);
             }
         }
     }
@@ -817,14 +817,14 @@ where
     // Apply filter
     if let Some(ast) = q.filter.as_deref() {
         let cond = expr_to_condition::<E>(ast, fmap)
-            .map_err(|e| ODataPageError::InvalidFilter(e.to_string()))?;
+            .map_err(|e| ODataError::InvalidFilter(e.to_string()))?;
         s = s.filter(cond);
     }
 
     // Apply cursor if present
     if let Some(cursor) = &q.cursor {
         let cond = build_cursor_predicate(cursor, &effective_order, fmap)
-            .map_err(|_| ODataPageError::InvalidCursor)?; // normalize db-level errors
+            .map_err(|_| ODataError::InvalidCursor)?; // normalize db-level errors
         s = s.filter(cond);
     }
 
@@ -837,7 +837,7 @@ where
     let mut rows = s
         .all(conn)
         .await
-        .map_err(|e| ODataPageError::Db(e.to_string()))?;
+        .map_err(|e| ODataError::Db(e.to_string()))?;
 
     let has_more = (rows.len() as u64) > limit;
     if has_more {

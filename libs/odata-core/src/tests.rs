@@ -1,10 +1,7 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
-    use crate::{
-        base64_url, CursorError, CursorV1, ODataOrderBy, ODataPageError, ODataQuery, OrderKey,
-        SortDir,
-    };
+    use crate::{base64_url, CursorV1, Error, ODataOrderBy, ODataQuery, OrderKey, SortDir};
 
     #[test]
     fn test_cursor_v1_encode_decode_round_trip() {
@@ -48,14 +45,14 @@ mod tests {
     #[test]
     fn test_cursor_v1_decode_invalid_base64() {
         let result = CursorV1::decode("invalid_base64!");
-        assert!(matches!(result, Err(CursorError::InvalidBase64)));
+        assert!(matches!(result, Err(Error::CursorInvalidBase64)));
     }
 
     #[test]
     fn test_cursor_v1_decode_invalid_json() {
         let invalid_json = base64_url::encode(b"not_json");
         let result = CursorV1::decode(&invalid_json);
-        assert!(matches!(result, Err(CursorError::InvalidJson)));
+        assert!(matches!(result, Err(Error::CursorInvalidJson)));
     }
 
     #[test]
@@ -68,7 +65,7 @@ mod tests {
         });
         let encoded = base64_url::encode(serde_json::to_vec(&cursor_data).unwrap().as_slice());
         let result = CursorV1::decode(&encoded);
-        assert!(matches!(result, Err(CursorError::InvalidVersion)));
+        assert!(matches!(result, Err(Error::CursorInvalidVersion)));
     }
 
     #[test]
@@ -81,7 +78,7 @@ mod tests {
         });
         let encoded = base64_url::encode(serde_json::to_vec(&cursor_data).unwrap().as_slice());
         let result = CursorV1::decode(&encoded);
-        assert!(matches!(result, Err(CursorError::InvalidKeys)));
+        assert!(matches!(result, Err(Error::CursorInvalidKeys)));
     }
 
     #[test]
@@ -94,7 +91,7 @@ mod tests {
         });
         let encoded = base64_url::encode(serde_json::to_vec(&cursor_data).unwrap().as_slice());
         let result = CursorV1::decode(&encoded);
-        assert!(matches!(result, Err(CursorError::InvalidFields)));
+        assert!(matches!(result, Err(Error::CursorInvalidFields)));
     }
 
     #[test]
@@ -107,7 +104,7 @@ mod tests {
         });
         let encoded = base64_url::encode(serde_json::to_vec(&cursor_data).unwrap().as_slice());
         let result = CursorV1::decode(&encoded);
-        assert!(matches!(result, Err(CursorError::InvalidDirection)));
+        assert!(matches!(result, Err(Error::CursorInvalidDirection)));
     }
 
     #[test]
@@ -276,10 +273,7 @@ mod tests {
         // Test empty string should now error
         let result = ODataOrderBy::from_signed_tokens("");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ODataPageError::InvalidOrderByField(_)
-        ));
+        assert!(matches!(result.unwrap_err(), Error::InvalidOrderByField(_)));
 
         // Test single field
         let result = ODataOrderBy::from_signed_tokens("-id").unwrap();
@@ -350,18 +344,12 @@ mod tests {
         // Test empty field name
         let result = ODataOrderBy::from_signed_tokens("+");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ODataPageError::InvalidOrderByField(_)
-        ));
+        assert!(matches!(result.unwrap_err(), Error::InvalidOrderByField(_)));
 
         // Test field with just sign
         let result = ODataOrderBy::from_signed_tokens("-");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ODataPageError::InvalidOrderByField(_)
-        ));
+        assert!(matches!(result.unwrap_err(), Error::InvalidOrderByField(_)));
 
         // Test field with comma but empty segment
         let result = ODataOrderBy::from_signed_tokens("+name,,+email");
@@ -376,5 +364,41 @@ mod tests {
         assert_eq!(result.0.len(), 1);
         assert_eq!(result.0[0].field, "name");
         assert_eq!(result.0[0].dir, SortDir::Asc);
+    }
+
+    #[test]
+    fn test_unified_error_handling() {
+        // Test cursor decode with unified error
+        let invalid_cursor = "invalid_base64!";
+        let result = CursorV1::decode(invalid_cursor);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::CursorInvalidBase64));
+
+        // Test that all cursor errors use the unified Error type
+        let invalid_json = base64_url::encode(b"not_json");
+        let result = CursorV1::decode(&invalid_json);
+        assert!(matches!(result.unwrap_err(), Error::CursorInvalidJson));
+    }
+
+    #[test]
+    fn test_error_messages() {
+        // Test that error messages are descriptive
+        let filter_err = Error::InvalidFilter("malformed expression".to_string());
+        assert_eq!(
+            filter_err.to_string(),
+            "invalid $filter: malformed expression"
+        );
+
+        let cursor_err = Error::CursorInvalidBase64;
+        assert_eq!(
+            cursor_err.to_string(),
+            "invalid cursor: invalid base64url encoding"
+        );
+
+        let orderby_err = Error::InvalidOrderByField("unknown_field".to_string());
+        assert_eq!(
+            orderby_err.to_string(),
+            "unsupported $orderby field: unknown_field"
+        );
     }
 }

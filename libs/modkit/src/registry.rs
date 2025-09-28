@@ -272,6 +272,73 @@ impl RegistryBuilder {
         self.stateful.insert(name, m);
     }
 
+    /// Detect cycles in the dependency graph using DFS with path tracking.
+    /// Returns the cycle path if found, None otherwise.
+    fn detect_cycle_with_path(
+        names: &[&'static str],
+        adj: &[Vec<usize>],
+    ) -> Option<Vec<&'static str>> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            White, // unvisited
+            Gray,  // visiting (on current path)
+            Black, // visited (finished)
+        }
+
+        let mut colors = vec![Color::White; names.len()];
+        let mut path = Vec::new();
+
+        fn dfs(
+            node: usize,
+            names: &[&'static str],
+            adj: &[Vec<usize>],
+            colors: &mut [Color],
+            path: &mut Vec<usize>,
+        ) -> Option<Vec<&'static str>> {
+            colors[node] = Color::Gray;
+            path.push(node);
+
+            for &neighbor in &adj[node] {
+                match colors[neighbor] {
+                    Color::Gray => {
+                        // Found a back edge - cycle detected
+                        // Find the cycle start in the current path
+                        if let Some(cycle_start) = path.iter().position(|&n| n == neighbor) {
+                            let cycle_indices = &path[cycle_start..];
+                            let mut cycle_path: Vec<&'static str> =
+                                cycle_indices.iter().map(|&i| names[i]).collect();
+                            // Close the cycle by adding the first node again
+                            cycle_path.push(names[neighbor]);
+                            return Some(cycle_path);
+                        }
+                    }
+                    Color::White => {
+                        if let Some(cycle) = dfs(neighbor, names, adj, colors, path) {
+                            return Some(cycle);
+                        }
+                    }
+                    Color::Black => {
+                        // Already processed, no cycle through this path
+                    }
+                }
+            }
+
+            path.pop();
+            colors[node] = Color::Black;
+            None
+        }
+
+        for i in 0..names.len() {
+            if colors[i] == Color::White {
+                if let Some(cycle) = dfs(i, names, adj, &mut colors, &mut path) {
+                    return Some(cycle);
+                }
+            }
+        }
+
+        None
+    }
+
     /// Finalize & topo-sort; verify deps & capability binding to known cores.
     pub fn build_topo_sorted(self) -> Result<ModuleRegistry, RegistryError> {
         if let Some((host_name, _)) = &self.rest_host {
@@ -307,14 +374,13 @@ impl RegistryBuilder {
             }
         }
 
-        // 2) build graph over core modules
+        // 2) build graph over core modules and detect cycles
         let names: Vec<&'static str> = self.core.keys().copied().collect();
         let mut idx: HashMap<&'static str, usize> = HashMap::new();
         for (i, &n) in names.iter().enumerate() {
             idx.insert(n, i);
         }
 
-        let mut indeg = vec![0usize; names.len()];
         let mut adj = vec![Vec::<usize>::new(); names.len()];
 
         for (&n, &deps) in self.deps.iter() {
@@ -328,11 +394,22 @@ impl RegistryBuilder {
                 })?;
                 // edge d -> n (dep before module)
                 adj[v].push(u);
-                indeg[u] += 1;
             }
         }
 
-        // 3) Kahn’s algorithm
+        // 3) Cycle detection using DFS with path tracking
+        if let Some(cycle_path) = Self::detect_cycle_with_path(&names, &adj) {
+            return Err(RegistryError::CycleDetected { path: cycle_path });
+        }
+
+        // 4) Kahn's algorithm for topological sorting (we know there are no cycles)
+        let mut indeg = vec![0usize; names.len()];
+        for adj_list in &adj {
+            for &target in adj_list {
+                indeg[target] += 1;
+            }
+        }
+
         let mut q = VecDeque::new();
         for (i, &degree) in indeg.iter().enumerate() {
             if degree == 0 {
@@ -349,9 +426,6 @@ impl RegistryBuilder {
                     q.push_back(w);
                 }
             }
-        }
-        if order.len() != names.len() {
-            return Err(RegistryError::CyclicDependency);
         }
 
         // 4) Build final entries in topo order
@@ -449,8 +523,8 @@ pub enum RegistryError {
     UnknownModule(String),
     #[error("module '{module}' depends on unknown '{depends_on}'")]
     UnknownDependency { module: String, depends_on: String },
-    #[error("cyclic dependency detected among modules")]
-    CyclicDependency,
+    #[error("cyclic dependency detected: {}", path.join(" -> "))]
+    CycleDetected { path: Vec<&'static str> },
     #[error("missing deps for '{0}'")]
     MissingDeps(String),
     #[error("core not found for '{0}'")]
@@ -570,7 +644,44 @@ mod tests {
         b.register_core_with_meta("b", &["a"], Arc::new(DummyCore));
 
         let err = b.build_topo_sorted().unwrap_err();
-        matches!(err, RegistryError::CyclicDependency);
+        match err {
+            RegistryError::CycleDetected { path } => {
+                // Should contain both modules in the cycle
+                assert!(path.contains(&"a"));
+                assert!(path.contains(&"b"));
+                assert!(path.len() >= 3); // At least a -> b -> a
+            }
+            other => panic!("expected CycleDetected, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn complex_cycle_detection_with_path() {
+        let mut b = RegistryBuilder::default();
+        // Create a more complex cycle: a -> b -> c -> a
+        b.register_core_with_meta("a", &["b"], Arc::new(DummyCore));
+        b.register_core_with_meta("b", &["c"], Arc::new(DummyCore));
+        b.register_core_with_meta("c", &["a"], Arc::new(DummyCore));
+        // Add an unrelated module to ensure we only detect the actual cycle
+        b.register_core_with_meta("d", &[], Arc::new(DummyCore));
+
+        let err = b.build_topo_sorted().unwrap_err();
+        match err {
+            RegistryError::CycleDetected { path } => {
+                // Should contain all modules in the cycle
+                assert!(path.contains(&"a"));
+                assert!(path.contains(&"b"));
+                assert!(path.contains(&"c"));
+                assert!(!path.contains(&"d")); // Should not include unrelated module
+                assert!(path.len() >= 4); // At least a -> b -> c -> a
+
+                // Verify the error message is helpful
+                let error_msg = format!("{}", RegistryError::CycleDetected { path: path.clone() });
+                assert!(error_msg.contains("cyclic dependency detected"));
+                assert!(error_msg.contains("->"));
+            }
+            other => panic!("expected CycleDetected, got: {other:?}"),
+        }
     }
 
     #[test]

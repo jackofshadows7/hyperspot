@@ -111,10 +111,7 @@ where
         Ok(res.rows_affected > 0)
     }
 
-    async fn list_users_page(
-        &self,
-        query: &ODataQuery,
-    ) -> Result<Page<User>, odata_core::ODataPageError> {
+    async fn list_users_page(&self, query: &ODataQuery) -> Result<Page<User>, odata_core::Error> {
         modkit_db::odata::paginate_with_odata::<UserEntity, User, _, _>(
             UserEntity::find(),
             &self.conn,
